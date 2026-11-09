@@ -54,7 +54,7 @@ private struct NetworkPrefix {
 }
 
 private enum ServiceError: Error {
-    case invalidRequest, invalidTemplate, cannotCreateConfig
+    case invalidRequest, invalidTemplate, cannotCreateConfig, cannotConfigureDNS
 }
 
 private func readBytes(_ count: Int, from peer: Int32) throws -> [UInt8] {
@@ -115,6 +115,24 @@ private func tunnelInterface() -> String? {
            name.range(of: #"^utun[0-9]+$"#, options: .regularExpression) != nil { return name }
     }
     return nil
+}
+
+private func installTunnelDNS() throws -> SCDynamicStore {
+    guard let store = SCDynamicStoreCreate(nil, "Qosmos VPN DNS" as CFString, nil, nil) else {
+        throw ServiceError.cannotConfigureDNS
+    }
+    let key = "State:/Network/Service/\(UUID().uuidString)/DNS" as CFString
+    let settings: [String: Any] = [
+        "ServerAddresses": ["198.18.10.2"],
+        "SupplementalMatchDomains": [""],
+        "SupplementalMatchOrders": [1],
+        "SupplementalMatchDomainsNoSearch": 1
+    ]
+    // The dynamic store removes this resolver when the session closes, including after a crash.
+    guard SCDynamicStoreAddTemporaryValue(store, key, settings as CFDictionary) else {
+        throw ServiceError.cannotConfigureDNS
+    }
+    return store
 }
 
 private func tunnelConfig(address: [UInt8], port: Int) throws -> Data {
@@ -197,18 +215,27 @@ private func serve(_ peer: Int32, uid: uid_t) throws {
         if engine.isRunning { kill(engine.processIdentifier, SIGKILL) }
         engine.waitUntilExit()
     }
+    var device: String?
+    for _ in 0..<50 where engine.isRunning {
+        if let name = tunnelInterface() { device = name; break }
+        usleep(100_000)
+    }
+    guard let device else { throw ServiceError.invalidRequest }
     if keepProtection {
-        var device: String?
-        for _ in 0..<50 where engine.isRunning {
-            if let name = tunnelInterface() { device = name; break }
-            usleep(100_000)
-        }
-        guard let device else { throw ServiceError.invalidRequest }
         try KillSwitch.replace(KillSwitch.rules(endpoint: request.endpoint, port: request.serverPort, uid: uid, tunnel: device))
     }
-    guard send(ready, to: peer) else { return }
-    var event = pollfd(fd: peer, events: Int16(POLLIN), revents: 0)
-    while engine.isRunning && poll(&event, 1, 500) == 0 {}
+    let dns: SCDynamicStore
+    do {
+        dns = try installTunnelDNS()
+    } catch {
+        _ = send(3, to: peer)
+        throw error
+    }
+    withExtendedLifetime(dns) {
+        guard send(ready, to: peer) else { return }
+        var event = pollfd(fd: peer, events: Int16(POLLIN), revents: 0)
+        while engine.isRunning && poll(&event, 1, 500) == 0 {}
+    }
 }
 
 private func runService() {

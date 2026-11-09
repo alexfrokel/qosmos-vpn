@@ -94,3 +94,4 @@
 "Доступ в интернет восстановлен." = "Internet access restored.";
 "Не удалось запустить туннель с Kill Switch." = "Could not start the tunnel with Kill Switch enabled.";
 "macOS запросит пароль для установки или обновления службы Qosmos VPN." = "macOS will ask for a password to install or upgrade the Qosmos VPN service.";
+"Не удалось направить DNS macOS в туннель VPN." = "Could not route macOS DNS through the VPN tunnel.";

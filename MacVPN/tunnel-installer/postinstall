@@ -7,3 +7,4 @@ if /bin/launchctl print "system/$job" >/dev/null 2>&1; then
 fi
 /bin/launchctl bootstrap system "/Library/LaunchDaemons/$job.plist"
 /usr/bin/install -o root -g wheel -m 0644 /dev/null "/Library/Application Support/QosmosVPN/kill-switch-v2"
+/usr/bin/install -o root -g wheel -m 0644 /dev/null "/Library/Application Support/QosmosVPN/tunnel-dns-v3"

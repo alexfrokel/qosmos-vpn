@@ -27,7 +27,8 @@ CHECK_URL = "https://api.ipify.org/"
 TUN_IPV4 = "198.18.10.1"
 SERVICE = Path("/Library/Application Support/QosmosVPN")
 SERVICE_SOCKET = SERVICE / "tunnel.sock"
-SERVICE_READY = SERVICE / "kill-switch-v2"
+SERVICE_READY = SERVICE / "tunnel-dns-v3"
+PREVIOUS_SERVICE_READY = SERVICE / "kill-switch-v2"
 AUTHORIZE = """on run argv
     return do shell script (item 1 of argv) with administrator privileges
 end run
@@ -286,7 +287,7 @@ def service_request(payload, accepted, timeout=10):
 
 
 def protection_blocked():
-    if not SERVICE_READY.is_file():
+    if not (SERVICE_READY.is_file() or PREVIOUS_SERVICE_READY.is_file()):
         return False
     connection, response = service_request(b"\x01", (b"\x01", b"\x02"), timeout=2)
     connection.close()
@@ -301,7 +302,10 @@ def release_protection():
 def start_tunnel(endpoint, port, server_port, protect):
     try:
         request = struct.pack("!BB16sHHB", 3, endpoint.version, endpoint.packed, port, server_port, protect)
-        connection, _ = service_request(request, (b"\x01",))
+        connection, response = service_request(request, (b"\x01", b"\x03"))
+        if response == b"\x03":
+            connection.close()
+            raise ProfileError("Не удалось направить DNS macOS в туннель VPN.")
         connection.settimeout(None)
         return connection
     except OSError as error:
