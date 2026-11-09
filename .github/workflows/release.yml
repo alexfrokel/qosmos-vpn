@@ -1,0 +1,75 @@
+name: macOS release
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-15
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check version and architecture
+        id: version
+        shell: bash
+        run: |
+          test "$(uname -m)" = arm64
+          version=$(/usr/libexec/PlistBuddy -c 'Print CFBundleShortVersionString' MacVPN/Info.plist)
+          [[ "$version" =~ ^[0-9]+\.[0-9]+(\.[0-9]+)?$ ]]
+          if [[ "$GITHUB_REF_TYPE" == tag ]]; then
+            test "$GITHUB_REF_NAME" = "v$version"
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - name: Fetch pinned upstream engines
+        run: MacVPN/fetch-engines.sh "$RUNNER_TEMP/qosmos-engines"
+      - name: Build and archive
+        shell: bash
+        run: |
+          export QOSMOS_ENGINE_DIR="$RUNNER_TEMP/qosmos-engines"
+          export QOSMOS_BUILD_DIR="$RUNNER_TEMP/qosmos-build"
+          export QOSMOS_UPDATE_SOURCE="https://github.com/$GITHUB_REPOSITORY/releases/latest/download/qosmos-update.json"
+          MacVPN/build.sh
+          mkdir -p dist
+          ditto -c -k --keepParent "$QOSMOS_BUILD_DIR/Qosmos VPN.app" dist/Qosmos-VPN-macOS-arm64.zip
+          /usr/bin/python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          tag = os.environ["GITHUB_REF_NAME"]
+          repo = os.environ["GITHUB_REPOSITORY"]
+          Path("dist/qosmos-update.json").write_text(json.dumps({
+              "version": tag.removeprefix("v"),
+              "url": f"https://github.com/{repo}/releases/download/{tag}/Qosmos-VPN-macOS-arm64.zip",
+          }) + "\n")
+          PY
+          cp MacVPN/THIRD-PARTY.md dist/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: qosmos-macos
+          path: dist/
+          if-no-files-found: error
+
+  publish:
+    if: github.ref_type == 'tag'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: qosmos-macos
+          path: dist
+      - name: Publish release and update manifest
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --repo "$GITHUB_REPOSITORY" --verify-tag --generate-notes \
+            --title "Qosmos VPN ${{ needs.build.outputs.version }}"

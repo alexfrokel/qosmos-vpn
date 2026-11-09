@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "https://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key><string>local.vlessvpn.tunnel</string>
+    <key>ProgramArguments</key>
+    <array><string>/Library/Application Support/QosmosVPN/tunnel-service</string></array>
+    <key>Sockets</key>
+    <dict>
+        <key>Tunnel</key>
+        <dict>
+            <key>SockPathName</key><string>/Library/Application Support/QosmosVPN/tunnel.sock</string>
+            <key>SockPathMode</key><integer>438</integer>
+        </dict>
+    </dict>
+</dict>
+</plist>

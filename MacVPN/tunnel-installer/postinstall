@@ -1,0 +1,9 @@
+#!/bin/bash
+set -euo pipefail
+[ "$3" = "/" ] || exit 1
+job=local.vlessvpn.tunnel
+if /bin/launchctl print "system/$job" >/dev/null 2>&1; then
+    /bin/launchctl bootout "system/$job"
+fi
+/bin/launchctl bootstrap system "/Library/LaunchDaemons/$job.plist"
+/usr/bin/install -o root -g wheel -m 0644 /dev/null "/Library/Application Support/QosmosVPN/kill-switch-v2"

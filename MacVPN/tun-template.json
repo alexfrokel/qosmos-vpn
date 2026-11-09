@@ -1,0 +1,64 @@
+{
+  "log": {
+    "level": "warn"
+  },
+  "inbounds": [
+    {
+      "type": "tun",
+      "address": [
+        "198.18.10.1/30",
+        "fd70:149:118::1/126"
+      ],
+      "mtu": 1400,
+      "auto_route": true,
+      "dns_mode": "hijack",
+      "route_address": [
+        "0.0.0.0/2",
+        "64.0.0.0/2",
+        "128.0.0.0/2",
+        "192.0.0.0/2",
+        "2000::/3"
+      ]
+    }
+  ],
+  "outbounds": [
+    {
+      "type": "socks",
+      "tag": "vps",
+      "server": "127.0.0.1",
+      "server_port": 1080,
+      "version": "5"
+    }
+  ],
+  "dns": {
+    "servers": [
+      {
+        "type": "https",
+        "tag": "cloudflare",
+        "server": "1.1.1.1",
+        "tls": {
+          "enabled": true,
+          "server_name": "cloudflare-dns.com"
+        },
+        "detour": "vps"
+      }
+    ],
+    "final": "cloudflare",
+    "strategy": "ipv4_only"
+  },
+  "route": {
+    "rules": [
+      {
+        "port": 53,
+        "action": "hijack-dns"
+      },
+      {
+        "network": "udp",
+        "port": 443,
+        "action": "reject",
+        "no_drop": true
+      }
+    ],
+    "final": "vps"
+  }
+}
