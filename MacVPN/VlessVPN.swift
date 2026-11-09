@@ -1,5 +1,6 @@
 import AppKit
 import CoreServices
+import Darwin
 import SwiftUI
 import UniformTypeIdentifiers
 
@@ -17,8 +18,21 @@ struct Profile: Codable, Equatable {
     let key: String
     let shortID: String
     let spider: String
+    var cloudflareHost: String?
+    var sshUser: String?
+    var sshPort: Int?
+    var sshIdentity: String?
+
+    var entryHost: String { cloudflareHost ?? host }
+    var entryIsIPAddress: Bool {
+        var ipv4 = in_addr()
+        var ipv6 = in6_addr()
+        return inet_pton(AF_INET, entryHost, &ipv4) == 1 || inet_pton(AF_INET6, entryHost, &ipv6) == 1
+    }
 
     var endpoint: String {
+        if let cloudflareHost { return "\(cloudflareHost):443" }
+        if sshUser != nil { return "\(host):\(sshPort ?? 22) · SSH" }
         let address = host.contains(":") ? "[\(host)]" : host
         return "\(address):\(port)"
     }
@@ -27,11 +41,14 @@ struct Profile: Codable, Equatable {
 struct SavedProfile: Codable, Identifiable {
     var id = UUID()
     var profile: Profile
+    var entryIP: String?
+    var exitIP: String?
 }
 
 struct BackendEvent: Decodable {
     let kind: String
     let message: String
+    let entryIP: String?
 }
 
 struct AppError: LocalizedError {
@@ -59,6 +76,7 @@ final class VPNModel: ObservableObject {
     @Published private(set) var internetBlocked = false
     @Published private(set) var checkingIP = false
     @Published private(set) var importBusy = false
+    @Published var provisioning = false
     @Published var errorMessage: String?
     @Published var showSettings = false
 
@@ -98,7 +116,7 @@ final class VPNModel: ObservableObject {
     var isRunning: Bool { backend != nil }
     var isConnected: Bool { state == .connected || state == .terminalConnected }
     var canToggle: Bool {
-        state != .disconnecting && !importBusy && (!isIdle || internetBlocked || selectedProfile != nil)
+        state != .disconnecting && !importBusy && !provisioning && (!isIdle || internetBlocked || selectedProfile != nil)
     }
     var stateLabel: String {
         switch state {
@@ -219,19 +237,19 @@ final class VPNModel: ObservableObject {
         try JSONEncoder().encode(entries).write(to: storage, options: .atomic)
     }
 
-    func importFile(_ url: URL) {
+    func importFile(_ url: URL, onSuccess: @escaping () -> Void = {}) {
         do {
             let size = try url.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0
             guard size <= 1_048_576 else { throw AppError(message: "Файл профилей больше 1 МБ.") }
             let content = try String(contentsOf: url, encoding: .utf8)
-            importText(content, name: url.deletingPathExtension().lastPathComponent)
+            importText(content, name: url.deletingPathExtension().lastPathComponent, onSuccess: onSuccess)
         } catch {
             errorMessage = (error as? AppError)?.message ?? "Не удалось прочитать файл в формате UTF-8."
         }
     }
 
-    func importText(_ text: String, name: String = "") {
-        guard !importBusy, isIdle else { return }
+    func importText(_ text: String, name: String = "", onSuccess: @escaping () -> Void = {}) {
+        guard !importBusy, !provisioning, isIdle else { return }
         guard text.utf8.count <= 1_048_576 else {
             errorMessage = "Профили занимают больше 1 МБ."
             return
@@ -251,7 +269,7 @@ final class VPNModel: ObservableObject {
                 }
                 let imported = try JSONDecoder().decode([Profile].self, from: data)
                 DispatchQueue.main.async { [weak self] in
-                    self?.storeImports(imported)
+                    if self?.storeImports(imported) == true { onSuccess() }
                 }
             } catch {
                 let message = (error as? AppError)?.message ?? "Не удалось импортировать профиль."
@@ -263,7 +281,8 @@ final class VPNModel: ObservableObject {
         }
     }
 
-    private func storeImports(_ imported: [Profile]) {
+    @discardableResult
+    func storeImports(_ imported: [Profile], exitIP: String? = nil, reportError: Bool = true) -> Bool {
         defer {
             importBusy = false
             if autoConnectPending { refreshTerminal() }
@@ -271,21 +290,24 @@ final class VPNModel: ObservableObject {
         var entries = profiles
         var firstID: UUID?
         for profile in imported {
-            let entry = entries.first { entry in
+            let index = entries.firstIndex { entry in
                 var candidate = profile
                 candidate.name = entry.profile.name
                 return entry.profile == candidate
-            } ?? SavedProfile(profile: profile)
-            if !entries.contains(where: { $0.id == entry.id }) { entries.append(entry) }
-            if firstID == nil { firstID = entry.id }
+            } ?? entries.endIndex
+            if index == entries.endIndex { entries.append(SavedProfile(profile: profile)) }
+            if let exitIP, imported.count == 1 { entries[index].exitIP = exitIP }
+            if firstID == nil { firstID = entries[index].id }
         }
         do {
             try save(entries)
             profiles = entries
             select(firstID)
             detail = "Профиль готов к подключению."
+            return true
         } catch {
-            errorMessage = "Не удалось сохранить профили на Mac."
+            if reportError { errorMessage = "Не удалось сохранить профили на Mac." }
+            return false
         }
     }
 
@@ -330,21 +352,30 @@ final class VPNModel: ObservableObject {
         }
     }
 
-    func removeSelection() {
-        guard isIdle, let selection else { return }
-        let remaining = profiles.filter { $0.id != selection }
+    func removeProfile(_ id: UUID) {
+        guard isIdle, !importBusy, !provisioning else { return }
+        let remaining = profiles.filter { $0.id != id }
         do {
             try save(remaining)
             profiles = remaining
-            select(remaining.first?.id)
+            if selection == id { select(remaining.first?.id) }
         } catch {
             errorMessage = "Не удалось удалить профиль."
         }
     }
 
+    private struct ConnectionRequest: Encodable {
+        let profile: Profile
+        let directSites: String
+        let directRuSites: Bool
+    }
+
     func connect(allowInstall: Bool = true) {
-        guard isIdle, !importBusy, let profile = selectedProfile else { return }
-        guard let payload = try? JSONEncoder().encode(profile) else {
+        guard isIdle, !importBusy, !provisioning, let profile = selectedProfile else { return }
+        let request = ConnectionRequest(
+            profile: profile, directSites: preferences.directSites, directRuSites: preferences.directRuSites
+        )
+        guard let payload = try? JSONEncoder().encode(request) else {
             errorMessage = "Не удалось прочитать выбранный профиль."
             return
         }
@@ -423,6 +454,7 @@ final class VPNModel: ObservableObject {
             state = .connected
             internetBlocked = false
             exitIP = event.message
+            rememberRoute(entryIP: event.entryIP, exitIP: event.message)
             detail = "Системный VPN активен."
             preferences.record("VPN connected")
         case "disconnected":
@@ -434,6 +466,18 @@ final class VPNModel: ObservableObject {
         default:
             break
         }
+    }
+
+    private func rememberRoute(entryIP: String?, exitIP: String) {
+        guard let index = profiles.firstIndex(where: { $0.id == selection }) else { return }
+        var entries = profiles
+        let updatedEntryIP = entryIP ?? entries[index].entryIP
+        guard entries[index].entryIP != updatedEntryIP || entries[index].exitIP != exitIP else { return }
+        entries[index].entryIP = updatedEntryIP
+        entries[index].exitIP = exitIP
+        profiles = entries
+        do { try save(entries) }
+        catch { preferences.record("Could not save the last successful profile route") }
     }
 
     private func finish(_ status: Int32, command: String) {
@@ -453,15 +497,17 @@ final class VPNModel: ObservableObject {
         refreshPublicIP()
     }
 
-    private static func makeBackend(_ arguments: [String]) throws -> (Process, Pipe, Pipe) {
-        guard let script = Bundle.main.url(forResource: "backend", withExtension: "py") else {
+    static func makeBackend(_ arguments: [String], resource: String = "backend") throws -> (Process, Pipe, Pipe) {
+        guard let script = Bundle.main.url(forResource: resource, withExtension: "py") else {
             throw AppError(message: "Файлы приложения не найдены. Пересоберите Qosmos VPN.")
         }
         let process = Process()
         let input = Pipe()
         let output = Pipe()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
-        process.arguments = ["-B", script.path] + arguments
+        let bundledPython = script.deletingLastPathComponent().appendingPathComponent("python/bin/python3")
+        process.executableURL = FileManager.default.isExecutableFile(atPath: bundledPython.path)
+            ? bundledPython : URL(fileURLWithPath: "/usr/bin/python3")
+        process.arguments = ["-I", "-B", script.path] + arguments
         process.standardInput = input
         process.standardOutput = output
         process.standardError = FileHandle.nullDevice
@@ -470,14 +516,16 @@ final class VPNModel: ObservableObject {
 }
 
 struct VPNView: View {
+    private enum Page { case dashboard, profiles, add, paste, setup, edit }
+
     @ObservedObject var model: VPNModel
     @ObservedObject var preferences: AppPreferences
-    @State private var pasteOpen = false
+    @State private var page = Page.dashboard
+    @State private var addReturnPage = Page.dashboard
     @State private var pastedText = ""
     @State private var confirmRemoval = false
-    @State private var renameOpen = false
     @State private var profileName = ""
-    @State private var renameID: UUID?
+    @State private var editingID: UUID?
 
     private let canvas = Color(red: 0.051, green: 0.055, blue: 0.066)
     private let surface = Color(red: 0.091, green: 0.096, blue: 0.110)
@@ -516,29 +564,17 @@ struct VPNView: View {
             .buttonStyle(.borderless)
             .accessibilityLabel(preferences.text("Настройки"))
             .help(preferences.text("Настройки"))
-            Menu {
-                Button(action: chooseFile) {
-                    Label(preferences.text("Импорт файла…"), systemImage: "doc.badge.plus")
-                }
-                Button {
-                    pastedText = NSPasteboard.general.string(forType: .string) ?? ""
-                    pasteOpen = true
-                } label: {
-                    Label(preferences.text("Вставить ссылку…"), systemImage: "link")
-                }
-            } label: {
+            Button { openAdd(from: .dashboard) } label: {
                 Image(systemName: "plus")
                     .font(.system(size: 15, weight: .medium))
                     .frame(width: 35, height: 35)
                     .background(surface, in: RoundedRectangle(cornerRadius: 10))
                     .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(.white.opacity(0.10)))
             }
-            .menuStyle(.borderlessButton)
-            .menuIndicator(.hidden)
-            .fixedSize()
+            .buttonStyle(.borderless)
             .accessibilityLabel(preferences.text("Добавить профиль"))
             .help(preferences.text("Добавить профиль"))
-            .disabled(!model.isIdle || model.importBusy)
+            .disabled(!canAdd)
         }
     }
 
@@ -632,74 +668,295 @@ struct VPNView: View {
         .background(surface, in: RoundedRectangle(cornerRadius: 11))
     }
 
+    private var canAdd: Bool { model.isIdle && !model.importBusy && !model.provisioning }
+
     private var profileControls: some View {
-        HStack(spacing: 12) {
-            Image(systemName: "point.3.connected.trianglepath.dotted")
-                .font(.system(size: 18, weight: .medium))
-                .foregroundStyle(accent)
-                .frame(width: 34, height: 34)
-                .background(accent.opacity(0.10), in: RoundedRectangle(cornerRadius: 8))
-                .accessibilityHidden(true)
-            VStack(alignment: .leading, spacing: 5) {
-                Text(preferences.text("Профиль"))
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(muted)
-                if let profile = model.selectedProfile {
-                    Text(profile.name)
-                        .font(.system(size: 14, weight: .semibold))
-                        .lineLimit(1)
-                    Text(profile.endpoint)
-                        .font(.system(size: 11, design: .monospaced))
+        Button {
+            page = model.profiles.isEmpty ? .add : .profiles
+            if model.profiles.isEmpty { addReturnPage = .dashboard }
+        } label: {
+            HStack(spacing: 12) {
+                tileIcon("point.3.connected.trianglepath.dotted")
+                VStack(alignment: .leading, spacing: 5) {
+                    Text(preferences.text("Профиль")).font(.system(size: 11, weight: .medium))
                         .foregroundStyle(muted)
-                        .textSelection(.enabled)
-                } else {
-                    Text(preferences.text(model.importBusy ? "Импортируем…" : "Добавьте профиль VLESS Reality"))
-                        .font(.system(size: 13, weight: .medium))
+                    if let profile = model.selectedProfile {
+                        Text(profile.name).font(.system(size: 14, weight: .semibold)).lineLimit(1)
+                        Text(profile.endpoint).font(.system(size: 11, design: .monospaced))
+                            .foregroundStyle(muted).lineLimit(1)
+                    } else {
+                        Text(preferences.text("Добавьте профиль VLESS Reality"))
+                            .font(.system(size: 13, weight: .medium))
+                    }
                 }
+                Spacer(minLength: 6)
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 12, weight: .semibold)).foregroundStyle(muted)
             }
-            Spacer(minLength: 6)
-            if let selectedID = model.selection, let selected = model.selectedProfile {
-                Menu {
-                    ForEach(model.profiles) { entry in
-                        Button {
-                            model.select(entry.id)
-                        } label: {
-                            if model.selection == entry.id {
-                                Label(entry.profile.name, systemImage: "checkmark")
-                            } else {
-                                Text(entry.profile.name)
-                            }
-                        }
-                        .disabled(!model.isIdle)
-                    }
-                    Divider()
-                    Button(preferences.text("Переименовать профиль…")) {
-                        renameID = selectedID
-                        profileName = selected.name
-                        renameOpen = true
-                    }
-                    Button(preferences.text("Удалить выбранный профиль…"), role: .destructive) {
-                        confirmRemoval = true
-                    }
-                    .disabled(!model.isIdle)
-                } label: {
-                    Image(systemName: "chevron.up.chevron.down")
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundStyle(muted)
-                        .frame(width: 32, height: 32)
-                        .background(.white.opacity(0.05), in: RoundedRectangle(cornerRadius: 8))
+            .padding(13)
+            .background(surface, in: RoundedRectangle(cornerRadius: 13))
+            .overlay(RoundedRectangle(cornerRadius: 13).strokeBorder(.white.opacity(0.08)))
+        }
+        .buttonStyle(.plain)
+        .help(preferences.text(model.profiles.isEmpty ? "Добавить профиль" : "Выбрать профиль"))
+        .disabled(model.profiles.isEmpty && !canAdd)
+    }
+
+    private func tileIcon(_ name: String) -> some View {
+        Image(systemName: name)
+            .font(.system(size: 16, weight: .medium))
+            .foregroundStyle(accent)
+            .frame(width: 34, height: 34)
+            .background(accent.opacity(0.10), in: RoundedRectangle(cornerRadius: 8))
+            .accessibilityHidden(true)
+    }
+
+    private func pageHeader(_ title: String, back: Page, canGoBack: Bool = true, add: Bool = false) -> some View {
+        HStack(spacing: 12) {
+            Button { page = back } label: {
+                Image(systemName: "chevron.left").font(.system(size: 14, weight: .semibold))
+                    .frame(width: 32, height: 32)
+            }
+            .buttonStyle(.borderless)
+            .accessibilityLabel(preferences.text("Назад"))
+            .disabled(!canGoBack)
+            Text(preferences.text(title)).font(.system(size: 22, weight: .semibold, design: .rounded))
+                .accessibilityAddTraits(.isHeader)
+            Spacer()
+            if add {
+                Button { openAdd(from: .profiles) } label: {
+                    Image(systemName: "plus").frame(width: 32, height: 32)
                 }
-                .menuStyle(.borderlessButton)
-                .menuIndicator(.hidden)
-                .fixedSize()
-                .accessibilityLabel(preferences.text("Выбрать профиль"))
-                .help(preferences.text("Выбрать профиль"))
-                .disabled(model.importBusy)
+                .buttonStyle(.borderless)
+                .accessibilityLabel(preferences.text("Добавить профиль"))
+                .disabled(!canAdd)
             }
         }
-        .padding(13)
-        .background(surface, in: RoundedRectangle(cornerRadius: 13))
-        .overlay(RoundedRectangle(cornerRadius: 13).strokeBorder(.white.opacity(0.08)))
+        .padding(.bottom, 4)
+    }
+
+    private func addOption(_ title: String, _ description: String, icon: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack(spacing: 12) {
+                tileIcon(icon)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(preferences.text(title)).font(.system(size: 14, weight: .semibold))
+                    Text(preferences.text(description)).font(.system(size: 12)).foregroundStyle(muted)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Spacer(minLength: 8)
+                Image(systemName: "chevron.right").font(.system(size: 11, weight: .semibold)).foregroundStyle(muted)
+            }
+            .padding(13)
+            .background(surface, in: RoundedRectangle(cornerRadius: 12))
+            .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(.white.opacity(0.08)))
+        }
+        .buttonStyle(.plain)
+        .disabled(!canAdd)
+    }
+
+    private var addPage: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            pageHeader("Добавить профиль", back: addReturnPage, canGoBack: !model.importBusy)
+            addOption("Настроить свой сервер", "Установить VPN на один VPS или настроить вход и выход.", icon: "server.rack") {
+                page = .setup
+            }
+            addOption("Вставить ссылку", "Добавить готовый профиль по ссылке vless://.", icon: "link") {
+                pastedText = NSPasteboard.general.string(forType: .string) ?? ""
+                page = .paste
+            }
+            addOption("Импортировать файл", "Открыть файл со ссылками или конфигурацией Xray.", icon: "doc.badge.plus") {
+                chooseFile()
+            }
+            if model.importBusy { importProgress }
+            Spacer()
+        }
+    }
+
+    private var importProgress: some View {
+        HStack(spacing: 8) {
+            ProgressView().controlSize(.small)
+            Text(preferences.text("Импортируем…")).foregroundStyle(muted)
+        }
+    }
+
+    private var pastePage: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            pageHeader("Вставить ссылку", back: .add, canGoBack: !model.importBusy)
+            Text(preferences.text("Вставьте ссылку vless:// или несколько ссылок, по одной на строку."))
+                .foregroundStyle(muted)
+            TextEditor(text: $pastedText)
+                .font(.system(.body, design: .monospaced))
+                .scrollContentBackground(.hidden)
+                .padding(8)
+                .background(surface, in: RoundedRectangle(cornerRadius: 12))
+                .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(.white.opacity(0.1)))
+                .frame(height: 200)
+                .accessibilityLabel(preferences.text("Вставить ссылку"))
+                .disabled(model.importBusy)
+            HStack {
+                if model.importBusy { importProgress }
+                Spacer()
+                Button(preferences.text("Импортировать")) {
+                    model.importText(pastedText, onSuccess: finishImport)
+                }
+                .buttonStyle(.borderedProminent)
+                .keyboardShortcut(.defaultAction)
+                .disabled(!canAdd || pastedText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+            Spacer()
+        }
+    }
+
+    private var profilesPage: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            pageHeader("Профили", back: .dashboard, add: true)
+            if model.profiles.isEmpty {
+                Text(preferences.text("Добавьте профиль VLESS Reality")).foregroundStyle(muted)
+            } else if !model.isIdle {
+                Text(preferences.text("Чтобы сменить профиль, сначала отключите VPN."))
+                    .font(.system(size: 12)).foregroundStyle(muted)
+            }
+            ScrollView {
+                LazyVStack(spacing: 9) {
+                    ForEach(model.profiles) { entry in profileRow(entry) }
+                }
+                .padding(.bottom, 4)
+            }
+        }
+    }
+
+    private func profileRow(_ entry: SavedProfile) -> some View {
+        let selected = model.selection == entry.id
+        return HStack(alignment: .top, spacing: 8) {
+            Button {
+                model.select(entry.id)
+                page = .dashboard
+            } label: {
+                HStack(alignment: .top, spacing: 11) {
+                    Image(systemName: selected ? "checkmark.circle.fill" : "circle")
+                        .font(.system(size: 17)).foregroundStyle(selected ? accent : muted)
+                        .padding(.top, 1)
+                        .accessibilityHidden(true)
+                    VStack(alignment: .leading, spacing: 7) {
+                        Text(entry.profile.name)
+                            .font(.system(size: 14, weight: .semibold))
+                            .fixedSize(horizontal: false, vertical: true)
+                        profileRoute(entry)
+                    }
+                    Spacer(minLength: 0)
+                }
+                .padding(.vertical, 12)
+                .padding(.leading, 12)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityAddTraits(selected ? .isSelected : [])
+            .disabled(!canAdd)
+            Button {
+                editingID = entry.id
+                profileName = entry.profile.name
+                confirmRemoval = false
+                page = .edit
+            } label: {
+                Image(systemName: "pencil")
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(muted)
+                    .frame(width: 30, height: 30)
+                    .background(.white.opacity(0.05), in: RoundedRectangle(cornerRadius: 7))
+            }
+            .buttonStyle(.borderless)
+            .help(preferences.text("Редактировать профиль"))
+            .accessibilityLabel(preferences.text("Редактировать профиль") + ": " + entry.profile.name)
+            .padding(.top, 8)
+            .padding(.trailing, 8)
+        }
+        .background(selected ? accent.opacity(0.07) : surface, in: RoundedRectangle(cornerRadius: 12))
+        .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(selected ? accent.opacity(0.42) : .white.opacity(0.08)))
+    }
+
+    private func profileRoute(_ entry: SavedProfile) -> some View {
+        let entryIP = entry.entryIP ?? (entry.profile.entryIsIPAddress ? entry.profile.entryHost : nil)
+        let direct = entry.profile.sshUser == nil && entry.profile.cloudflareHost == nil
+        let configuredExit = direct && entry.profile.entryIsIPAddress ? entry.profile.entryHost : nil
+        return Grid(alignment: .leading, horizontalSpacing: 8, verticalSpacing: 3) {
+            routeLine("Вход", value: entryIP ?? entry.profile.entryHost, isIP: entryIP != nil)
+            routeLine("Выход", value: entry.exitIP ?? configuredExit ?? preferences.text("После подключения"),
+                      isIP: entry.exitIP != nil || configuredExit != nil)
+        }
+    }
+
+    private func routeLine(_ title: String, value: String, isIP: Bool) -> some View {
+        GridRow {
+            Text(preferences.text(title)).foregroundStyle(muted)
+            Text(value)
+                .font(isIP ? .system(size: 11, weight: .medium, design: .monospaced) : .system(size: 11))
+                .foregroundStyle(isIP ? ink : muted)
+                .lineLimit(1)
+                .truncationMode(.middle)
+                .help(value)
+        }
+        .font(.system(size: 11))
+    }
+
+    private var editPage: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            pageHeader("Редактировать профиль", back: .profiles)
+            if let id = editingID, let entry = model.profiles.first(where: { $0.id == id }) {
+                TextField(preferences.text("Название профиля"), text: $profileName)
+                    .textFieldStyle(.roundedBorder)
+                profileRoute(entry).padding(.bottom, 6)
+                HStack {
+                    Spacer()
+                    Button(preferences.text("Сохранить")) {
+                        if model.renameProfile(id, to: profileName) { page = .profiles }
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(VPNModel.normalizedProfileName(profileName) == nil || confirmRemoval)
+                }
+                Divider()
+                if confirmRemoval {
+                    Text(preferences.text("Удалить этот профиль?"))
+                    HStack {
+                        Button(preferences.text("Отмена")) { confirmRemoval = false }
+                        Button(preferences.text("Удалить"), role: .destructive) {
+                            model.removeProfile(id)
+                            if !model.profiles.contains(where: { $0.id == id }) { page = .profiles }
+                        }
+                        .tint(.red)
+                        .disabled(!canAdd)
+                    }
+                } else {
+                    Button(preferences.text("Удалить профиль"), role: .destructive) { confirmRemoval = true }
+                        .foregroundStyle(.red)
+                        .disabled(!canAdd)
+                }
+            }
+            Spacer()
+        }
+    }
+
+    private func openAdd(from origin: Page) {
+        addReturnPage = origin
+        page = .add
+    }
+
+    private func finishImport() {
+        pastedText = ""
+        page = .profiles
+    }
+
+    private func subpage<Content: View>(_ content: Content) -> some View {
+        content
+            .padding(.horizontal, 24)
+            .padding(.top, 18)
+            .padding(.bottom, 24)
+            .frame(width: 430, height: 540, alignment: .topLeading)
+            .foregroundStyle(ink)
+            .tint(accent)
+            .background(canvas)
     }
 
     private var dashboard: some View {
@@ -722,52 +979,21 @@ struct VPNView: View {
             if model.showSettings {
                 QosmosSettingsView(model: model, preferences: preferences)
             } else {
-                dashboard
+                switch page {
+                case .dashboard: dashboard
+                case .profiles: subpage(profilesPage)
+                case .add: subpage(addPage)
+                case .paste: subpage(pastePage)
+                case .setup:
+                    ServerSetupView(model: model) { saved in page = saved ? .profiles : .add }
+                        .frame(width: 430, height: 540)
+                        .foregroundStyle(ink)
+                        .background(canvas)
+                case .edit: subpage(editPage)
+                }
             }
         }
         .preferredColorScheme(.dark)
-        .sheet(isPresented: $renameOpen) {
-            VStack(alignment: .leading, spacing: 14) {
-                Text(preferences.text("Переименовать профиль")).font(.headline)
-                TextField(preferences.text("Название профиля"), text: $profileName)
-                    .textFieldStyle(.roundedBorder)
-                HStack {
-                    Spacer()
-                    Button(preferences.text("Отмена"), role: .cancel) { renameOpen = false }
-                    Button(preferences.text("Сохранить")) {
-                        if let id = renameID, model.renameProfile(id, to: profileName) { renameOpen = false }
-                    }
-                    .keyboardShortcut(.defaultAction)
-                    .disabled(VPNModel.normalizedProfileName(profileName) == nil)
-                }
-            }
-            .padding(22).frame(width: 400)
-        }
-        .sheet(isPresented: $pasteOpen) {
-            VStack(alignment: .leading, spacing: 14) {
-                Text(preferences.text("Импорт VLESS Reality")).font(.headline)
-                Text(preferences.text("Вставьте ссылку vless:// или несколько ссылок, по одной на строку."))
-                    .foregroundStyle(.secondary)
-                TextEditor(text: $pastedText).font(.system(.body, design: .monospaced))
-                    .frame(minHeight: 112)
-                    .border(.secondary.opacity(0.3))
-                HStack {
-                    Spacer()
-                    Button(preferences.text("Отмена"), role: .cancel) { pasteOpen = false }
-                    Button(preferences.text("Импортировать")) {
-                        model.importText(pastedText)
-                        pasteOpen = false
-                    }
-                    .keyboardShortcut(.defaultAction)
-                    .disabled(pastedText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                }
-            }
-            .padding(22).frame(width: 430)
-        }
-        .alert(preferences.text("Удалить выбранный профиль?"), isPresented: $confirmRemoval) {
-            Button(preferences.text("Удалить"), role: .destructive) { model.removeSelection() }
-            Button(preferences.text("Отмена"), role: .cancel) {}
-        }
         .alert("Qosmos VPN", isPresented: Binding(
             get: { model.errorMessage != nil },
             set: { if !$0 { model.errorMessage = nil } }
@@ -784,7 +1010,7 @@ struct VPNView: View {
         panel.allowedContentTypes = [.plainText, .json]
         panel.allowsOtherFileTypes = true
         panel.canChooseDirectories = false
-        if panel.runModal() == .OK, let file = panel.url { model.importFile(file) }
+        if panel.runModal() == .OK, let file = panel.url { model.importFile(file, onSuccess: finishImport) }
     }
 }
 
@@ -847,6 +1073,7 @@ final class VPNDelegate: NSObject, NSApplicationDelegate {
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        if model.provisioning { return .terminateCancel }
         guard model.isRunning else { return .terminateNow }
         model.quit(afterDisconnect: { sender.reply(toApplicationShouldTerminate: true) })
         return .terminateLater

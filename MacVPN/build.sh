@@ -12,9 +12,15 @@ iconset="$build/AppIcon.iconset"
 mkdir -p "$app/Contents/MacOS" "$resources/en.lproj" "$module_cache" "$iconset"
 
 install -m 0644 "$source_dir/backend.py" "$resources/backend.py"
+for file in server_setup.py server-setup-entry.sh server-setup-exit.sh; do
+    install -m 0644 "$source_dir/$file" "$resources/$file"
+done
 install -m 0644 "$source_dir/Info.plist" "$app/Contents/Info.plist"
 if [[ -n "${QOSMOS_UPDATE_SOURCE:-}" ]]; then
-    plutil -insert QosmosUpdateSource -string "$QOSMOS_UPDATE_SOURCE" "$app/Contents/Info.plist"
+    plutil -replace QosmosUpdateSource -string "$QOSMOS_UPDATE_SOURCE" "$app/Contents/Info.plist"
+fi
+if [[ -n "${QOSMOS_DIRECT_SITES:-}" ]]; then
+    plutil -insert QosmosDirectSites -string "$QOSMOS_DIRECT_SITES" "$app/Contents/Info.plist"
 fi
 install -m 0644 "$source_dir/en.lproj/Localizable.strings" "$resources/en.lproj/Localizable.strings"
 install -m 0644 "$source_dir/tun-template.json" "$resources/mac-vpn.json"
@@ -41,14 +47,26 @@ install -m 0644 "$source_dir/local.vlessvpn.tunnel.plist" "$package_root/Library
 install -m 0644 "$source_dir/tun-template.json" "$service_dir/tun-template.json"
 install -m 0755 "$engines/sing-box" "$service_dir/sing-box"
 xcrun swiftc -target "$swift_target" -O -module-cache-path "$module_cache" \
-    "$source_dir/TunnelService.swift" "$source_dir/KillSwitch.swift" -o "$service_dir/tunnel-service"
+    "$source_dir/TunnelService.swift" "$source_dir/KillSwitch.swift" "$source_dir/SplitTunnel.swift" \
+    -o "$service_dir/tunnel-service"
 codesign --force --sign - "$service_dir/tunnel-service" "$service_dir/sing-box"
 COPYFILE_DISABLE=1 pkgbuild --root "$package_root" --scripts "$source_dir/tunnel-installer" \
-    --install-location / --ownership recommended --identifier local.vlessvpn.tunnel.pkg --version 3 \
+    --install-location / --ownership recommended --identifier local.vlessvpn.tunnel.pkg --version 7 \
     "$resources/Qosmos Tunnel.pkg"
 xcrun swiftc -target "$swift_target" -parse-as-library -O -module-cache-path "$module_cache" \
-    "$source_dir/VlessVPN.swift" "$source_dir/AppSettings.swift" -o "$app/Contents/MacOS/VLESSVPN"
+    "$source_dir/VlessVPN.swift" "$source_dir/AppSettings.swift" "$source_dir/ServerSetup.swift" \
+    -o "$app/Contents/MacOS/VLESSVPN"
 codesign --force --sign - "$app/Contents/Resources/xray" "$app/Contents/Resources/sing-box"
+if [[ -n "${QOSMOS_PYTHON_DIR:-}" ]]; then
+    test -x "$QOSMOS_PYTHON_DIR/bin/python3"
+    ditto --norsrc "$QOSMOS_PYTHON_DIR" "$resources/python"
+    find "$resources/python" -type f \( -name '*.so' -o -name '*.dylib' -o -name 'python3.*' \) -print0 |
+        while IFS= read -r -d '' executable; do
+            if file -b "$executable" | /usr/bin/grep -q '^Mach-O'; then
+                codesign --force --sign - "$executable"
+            fi
+        done
+fi
 codesign --force --sign - "$app"
 codesign --verify --deep --strict "$app"
 printf '%s\n' "$app"

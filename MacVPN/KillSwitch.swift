@@ -8,10 +8,22 @@ struct KillSwitch {
         try !pf(["-a", anchor, "-sr"]).trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
-    static func rules(endpoint: String, port: Int, uid: uid_t, tunnel: String?) -> String {
+    static func rules(endpoint: String, port: Int, uid: uid_t, tunnel: String?, split: SplitTunnel? = nil) -> String {
         let family = endpoint.contains(":") ? "inet6" : "inet"
         var lines = ["pass quick on lo0 all no state"]
         if let tunnel { lines.append("pass quick on \(tunnel) all no state") }
+        if tunnel != nil, let split {
+            let rule = "pass out quick on \(split.interface) inet proto tcp from any"
+            let web = "port { 80, 443 } flags any user 0 keep state (if-bound)"
+            if !split.addresses.isEmpty {
+                let destinations = split.addresses.joined(separator: ", ")
+                lines.append("\(rule) to { \(destinations) } \(web)")
+            }
+            if split.directRuSites {
+                lines.insert("table <qosmos_non_public_v4> { \(SplitTunnel.nonPublicIPv4.joined(separator: ", ")) }", at: 0)
+                lines.append("\(rule) to ! <qosmos_non_public_v4> \(web)")
+            }
+        }
         lines += [
             "pass out quick \(family) proto tcp from any to \(endpoint) port = \(port) flags any user \(uid) keep state (if-bound)",
             "pass out quick inet proto udp from any port 68 to any port 67 no state",
@@ -50,6 +62,14 @@ struct KillSwitch {
 
     static func replace(_ rules: String) throws {
         _ = try pf(["-a", anchor, "-f", "-"], input: rules)
+    }
+
+    static func clearDirectStates(_ split: SplitTunnel) throws {
+        if split.directRuSites {
+            _ = try pf(["-i", split.interface, "-F", "states"])
+        } else {
+            for address in split.addresses { _ = try pf(["-k", "0.0.0.0/0", "-k", address]) }
+        }
     }
 
     static func clear() throws {

@@ -36,10 +36,12 @@ jobs:
           print(KillSwitch.rules(endpoint: "192.0.2.10", port: 443, uid: 501, tunnel: "utun3"))
           print(KillSwitch.rules(endpoint: "2001:db8::10", port: 8443, uid: 501, tunnel: nil))
           SWIFT
-          swiftc "$RUNNER_TEMP/main.swift" MacVPN/KillSwitch.swift -o "$RUNNER_TEMP/qosmos-rules"
+          swiftc "$RUNNER_TEMP/main.swift" MacVPN/KillSwitch.swift MacVPN/SplitTunnel.swift -o "$RUNNER_TEMP/qosmos-rules"
           "$RUNNER_TEMP/qosmos-rules" | sudo /sbin/pfctl -n -a com.apple/000.QosmosVPN -f -
       - name: Build and archive
         shell: bash
+        env:
+          QOSMOS_VERSION: ${{ steps.version.outputs.version }}
         run: |
           export QOSMOS_ENGINE_DIR="$RUNNER_TEMP/qosmos-engines"
           export QOSMOS_BUILD_DIR="$RUNNER_TEMP/qosmos-build"
@@ -50,10 +52,11 @@ jobs:
           /usr/bin/python3 - <<'PY'
           import json, os
           from pathlib import Path
-          tag = os.environ["GITHUB_REF_NAME"]
+          version = os.environ["QOSMOS_VERSION"]
+          tag = f"v{version}"
           repo = os.environ["GITHUB_REPOSITORY"]
           Path("dist/qosmos-update.json").write_text(json.dumps({
-              "version": tag.removeprefix("v"),
+              "version": version,
               "url": f"https://github.com/{repo}/releases/download/{tag}/Qosmos-VPN-macOS-arm64.zip",
           }) + "\n")
           PY

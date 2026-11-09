@@ -8,3 +8,7 @@ fi
 /bin/launchctl bootstrap system "/Library/LaunchDaemons/$job.plist"
 /usr/bin/install -o root -g wheel -m 0644 /dev/null "/Library/Application Support/QosmosVPN/kill-switch-v2"
 /usr/bin/install -o root -g wheel -m 0644 /dev/null "/Library/Application Support/QosmosVPN/tunnel-dns-v3"
+/usr/bin/install -o root -g wheel -m 0644 /dev/null "/Library/Application Support/QosmosVPN/tunnel-split-v4"
+/usr/bin/install -o root -g wheel -m 0644 /dev/null "/Library/Application Support/QosmosVPN/tunnel-split-v5"
+/usr/bin/install -o root -g wheel -m 0644 /dev/null "/Library/Application Support/QosmosVPN/tunnel-split-ru-v6"
+/usr/bin/install -o root -g wheel -m 0644 /dev/null "/Library/Application Support/QosmosVPN/tunnel-cloudflare-v7"

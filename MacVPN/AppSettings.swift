@@ -10,6 +10,7 @@ enum AppLanguage: String, CaseIterable {
 enum AppBuild {
     static let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0"
     static let updateSource = Bundle.main.object(forInfoDictionaryKey: "QosmosUpdateSource") as? String ?? ""
+    static let directSites = Bundle.main.object(forInfoDictionaryKey: "QosmosDirectSites") as? String ?? ""
 }
 
 final class AppPreferences: ObservableObject {
@@ -21,6 +22,8 @@ final class AppPreferences: ObservableObject {
 
     @Published var autoConnect: Bool { didSet { defaults.set(autoConnect, forKey: "autoConnect") } }
     @Published var killSwitch: Bool { didSet { defaults.set(killSwitch, forKey: "killSwitch") } }
+    @Published var directSites: String { didSet { defaults.set(directSites, forKey: "directSites") } }
+    @Published var directRuSites: Bool { didSet { defaults.set(directRuSites, forKey: "directRuSites") } }
     @Published var launchMinimized: Bool { didSet { defaults.set(launchMinimized, forKey: "launchMinimized") } }
     @Published var autoUpdates: Bool { didSet { defaults.set(autoUpdates, forKey: "autoUpdates") } }
     @Published var updateSource: String {
@@ -52,6 +55,8 @@ final class AppPreferences: ObservableObject {
             .appendingPathComponent("VLESS VPN", isDirectory: true)
         autoConnect = defaults.bool(forKey: "autoConnect")
         killSwitch = defaults.object(forKey: "killSwitch") as? Bool ?? true
+        directSites = defaults.string(forKey: "directSites") ?? AppBuild.directSites
+        directRuSites = defaults.bool(forKey: "directRuSites")
         launchMinimized = defaults.bool(forKey: "launchMinimized")
         autoUpdates = defaults.object(forKey: "autoUpdates") as? Bool ?? true
         updateSource = defaults.string(forKey: "updateSource").flatMap(Self.httpsURL)?.absoluteString ?? AppBuild.updateSource
@@ -124,6 +129,8 @@ final class AppPreferences: ObservableObject {
         }
         autoConnect = false
         killSwitch = true
+        directSites = AppBuild.directSites
+        directRuSites = false
         launchMinimized = false
         autoUpdates = true
         updateSource = AppBuild.updateSource
@@ -224,6 +231,22 @@ struct QosmosSettingsView: View {
                     Divider()
                     row("Kill Switch", "Блокировать интернет при обрыве VPN. Изменение применяется при следующем подключении.") {
                         Toggle("Kill Switch", isOn: $preferences.killSwitch)
+                            .labelsHidden().toggleStyle(.switch)
+                    }
+                    Divider()
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text(preferences.text("Сайты напрямую")).font(.system(size: 14, weight: .medium))
+                        TextField("aeza.ru, my.aeza.ru", text: $preferences.directSites)
+                            .textFieldStyle(.roundedBorder)
+                            .accessibilityLabel(preferences.text("Сайты напрямую"))
+                        Text(preferences.text("Введите до 8 доменов через запятую. Добавляйте поддомены отдельно. Применяется после переподключения."))
+                            .font(.system(size: 12)).foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    .padding(.vertical, 11)
+                    Divider()
+                    row("Сайты .ru напрямую", "Открывать сайты .ru и их поддомены через обычное подключение. Применяется после переподключения.") {
+                        Toggle(preferences.text("Сайты .ru напрямую"), isOn: $preferences.directRuSites)
                             .labelsHidden().toggleStyle(.switch)
                     }
                     Divider()
