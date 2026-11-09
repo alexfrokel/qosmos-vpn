@@ -11,7 +11,7 @@ permissions:
 
 jobs:
   build:
-    runs-on: macos-15
+    runs-on: macos-26
     outputs:
       version: ${{ steps.version.outputs.version }}
     steps:
@@ -29,6 +29,15 @@ jobs:
           echo "version=$version" >> "$GITHUB_OUTPUT"
       - name: Fetch pinned upstream engines
         run: MacVPN/fetch-engines.sh "$RUNNER_TEMP/qosmos-engines"
+      - name: Validate Kill Switch rules
+        shell: bash
+        run: |
+          cat > "$RUNNER_TEMP/main.swift" <<'SWIFT'
+          print(KillSwitch.rules(endpoint: "192.0.2.10", port: 443, uid: 501, tunnel: "utun3"))
+          print(KillSwitch.rules(endpoint: "2001:db8::10", port: 8443, uid: 501, tunnel: nil))
+          SWIFT
+          swiftc "$RUNNER_TEMP/main.swift" MacVPN/KillSwitch.swift -o "$RUNNER_TEMP/qosmos-rules"
+          "$RUNNER_TEMP/qosmos-rules" | sudo /sbin/pfctl -n -a com.apple/000.QosmosVPN -f -
       - name: Build and archive
         shell: bash
         run: |
