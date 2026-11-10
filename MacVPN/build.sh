@@ -51,7 +51,7 @@ xcrun swiftc -target "$swift_target" -O -module-cache-path "$module_cache" \
     -o "$service_dir/tunnel-service"
 codesign --force --sign - "$service_dir/tunnel-service" "$service_dir/sing-box"
 COPYFILE_DISABLE=1 pkgbuild --root "$package_root" --scripts "$source_dir/tunnel-installer" \
-    --install-location / --ownership recommended --identifier local.vlessvpn.tunnel.pkg --version 8 \
+    --install-location / --ownership recommended --identifier local.vlessvpn.tunnel.pkg --version 9 \
     "$resources/Qosmos Tunnel.pkg"
 xcrun swiftc -target "$swift_target" -parse-as-library -O -module-cache-path "$module_cache" \
     "$source_dir/VlessVPN.swift" "$source_dir/AppSettings.swift" "$source_dir/ServerSetup.swift" \

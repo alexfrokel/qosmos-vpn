@@ -27,8 +27,8 @@ struct SplitTunnel {
     init(sites: [DirectSite], directRuSites: Bool, cloudflareEdge: String? = nil, vpnSites: [String] = []) throws {
         guard (directRuSites || !sites.isEmpty || cloudflareEdge != nil || !vpnSites.isEmpty),
               cloudflareEdge.map(Self.publicIPv4) ?? true,
-              sites.count <= 8, Set(sites.map(\.host)).count == sites.count,
-              vpnSites.count <= 8, Set(vpnSites).count == vpnSites.count,
+              sites.count <= 20, Set(sites.map(\.host)).count == sites.count,
+              vpnSites.count <= 20, Set(vpnSites).count == vpnSites.count,
               vpnSites.allSatisfy(Self.validHost),
               sites.allSatisfy(Self.valid) else { throw SplitError.invalidSites }
         let key = "State:/Network/Global/IPv4" as CFString

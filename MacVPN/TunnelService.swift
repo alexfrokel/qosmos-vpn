@@ -200,7 +200,7 @@ private func serve(_ peer: Int32, uid: uid_t) throws {
             }
             let length = try readBytes(2, from: peer)
             let count = Int(length[0]) * 256 + Int(length[1])
-            guard (1...4096).contains(count) else { throw ServiceError.invalidRequest }
+            guard (1...8192).contains(count) else { throw ServiceError.invalidRequest }
             let hosts = try JSONDecoder().decode([String].self, from: Data(readBytes(count, from: peer)))
             guard !hosts.isEmpty else { throw ServiceError.invalidRequest }
             split = try SplitTunnel(sites: [], directRuSites: false, cloudflareEdge: cloudflare ? request.endpoint : nil,

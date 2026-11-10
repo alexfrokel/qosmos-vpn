@@ -489,8 +489,8 @@ struct QosmosSettingsView: View {
                       prompt: Text(only ? "youtube.com, github.com" : "aeza.ru, my.aeza.ru"))
                 .textFieldStyle(.roundedBorder)
             Text(preferences.text(only
-                ? "Укажите до 8 доменов через запятую. Применяется при следующем подключении."
-                : "Введите до 8 доменов через запятую. Добавляйте поддомены отдельно. Применяется после переподключения."))
+                ? "Укажите до 20 доменов через запятую. Применяется при следующем подключении."
+                : "Введите до 20 доменов через запятую. Добавляйте поддомены отдельно. Применяется после переподключения."))
                 .font(.system(size: 12)).foregroundStyle(.secondary)
             if !only {
                 Divider()

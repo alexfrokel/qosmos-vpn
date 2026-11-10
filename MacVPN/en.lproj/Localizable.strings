@@ -77,8 +77,8 @@
 "Выбранные домены и их поддомены идут через VPN. Остальные сайты открываются напрямую." = "Selected domains and their subdomains use the VPN. Other websites connect directly.";
 "Выбранные домены открываются напрямую. Остальные сайты идут через VPN." = "Selected domains connect directly. Other websites use the VPN.";
 "Домены сайтов" = "Website domains";
-"Укажите до 8 доменов через запятую. Применяется при следующем подключении." = "Enter up to 8 comma-separated domains. Applies on the next connection.";
-"Укажите до 8 доменов для VPN через запятую." = "Enter up to 8 comma-separated VPN domains.";
+"Укажите до 20 доменов через запятую. Применяется при следующем подключении." = "Enter up to 20 comma-separated domains. Applies on the next connection.";
+"Укажите до 20 доменов для VPN через запятую." = "Enter up to 20 comma-separated VPN domains.";
 "Добавьте хотя бы один сайт в список «Выбранные сайты через VPN»." = "Add at least one site to the list of sites that use the VPN.";
 "IP выхода VPN" = "VPN exit IP";
 "Для этой версии недоступна установка из приложения." = "This release does not support in-app installation.";
@@ -130,9 +130,9 @@
 "Сайты напрямую" = "Sites outside the VPN";
 "Сайты .ru напрямую" = "Bypass VPN for .ru sites";
 "Открывать сайты .ru и их поддомены через обычное подключение. Применяется после переподключения." = "Open .ru sites and their subdomains through your normal connection. Applies after reconnecting.";
-"Введите до 8 доменов через запятую. Добавляйте поддомены отдельно. Применяется после переподключения." = "Enter up to 8 comma-separated domains. Add subdomains separately. Changes apply when you reconnect.";
+"Введите до 20 доменов через запятую. Добавляйте поддомены отдельно. Применяется после переподключения." = "Enter up to 20 comma-separated domains. Add subdomains separately. Changes apply when you reconnect.";
 "Не удалось настроить сайты напрямую. Проверьте адреса и подключение по Wi-Fi или Ethernet." = "Could not set up direct sites. Check the addresses and your Wi-Fi or Ethernet connection.";
-"Укажите до 8 доменов сайтов напрямую, через запятую." = "Enter up to 8 comma-separated domains for direct sites.";
+"Укажите до 20 доменов сайтов напрямую, через запятую." = "Enter up to 20 comma-separated domains for direct sites.";
 "Не удалось получить публичный IPv4 для сайта из списка «Сайты напрямую»." = "Could not find a public IPv4 address for a site in the direct sites list.";
 "Домен api.ipify.org нужен для проверки VPN и не может идти напрямую." = "Qosmos uses api.ipify.org to verify the VPN, so it cannot be routed directly.";
 "Профили" = "Profiles";

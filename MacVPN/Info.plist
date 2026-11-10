@@ -9,8 +9,8 @@
     <key>CFBundleIconFile</key><string>AppIcon</string>
     <key>CFBundleIdentifier</key><string>local.vlessvpn.mac</string>
     <key>CFBundlePackageType</key><string>APPL</string>
-    <key>CFBundleShortVersionString</key><string>1.9.5</string>
-    <key>CFBundleVersion</key><string>19</string>
+    <key>CFBundleShortVersionString</key><string>1.9.6</string>
+    <key>CFBundleVersion</key><string>20</string>
     <key>QosmosUpdateSource</key><string>https://github.com/alexfrokel/qosmos-vpn/releases/latest/download/qosmos-update.json</string>
     <key>LSMinimumSystemVersion</key><string>26.0</string>
     <key>NSHighResolutionCapable</key><true/>

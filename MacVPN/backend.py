@@ -34,6 +34,8 @@ SPLIT_SERVICE_READY = SERVICE / "tunnel-split-v5"
 RU_SPLIT_SERVICE_READY = SERVICE / "tunnel-split-ru-v6"
 CLOUDFLARE_SERVICE_READY = SERVICE / "tunnel-cloudflare-v7"
 VPN_SITES_SERVICE_READY = SERVICE / "tunnel-vpn-sites-v8"
+EXTENDED_SPLIT_SERVICE_READY = SERVICE / "tunnel-split-v9"
+MAX_SPLIT_SITES = 20
 PREVIOUS_SERVICE_READY = SERVICE / "kill-switch-v2"
 AUTHORIZE = """on run argv
     return do shell script (item 1 of argv) with administrator privileges
@@ -323,12 +325,14 @@ def run_admin(arguments, failure, include_error=False):
     return result.stdout
 
 
-def prepare_service(allow_install, split=False, direct_ru=False, cloudflare=False, vpn_sites=False):
+def prepare_service(allow_install, split=False, direct_ru=False, cloudflare=False, vpn_sites=False, extended_split=False):
     required = RU_SPLIT_SERVICE_READY if direct_ru else (SPLIT_SERVICE_READY if split else SERVICE_READY)
     if cloudflare:
         required = CLOUDFLARE_SERVICE_READY
     if vpn_sites:
         required = VPN_SITES_SERVICE_READY
+    if extended_split:
+        required = EXTENDED_SPLIT_SERVICE_READY
     if not required.is_file():
         if not allow_install:
             raise ProfileError("Для автоподключения один раз подключитесь вручную и установите службу Qosmos VPN.")
@@ -393,7 +397,8 @@ def start_tunnel(endpoint, port, server_port, protect, direct_sites, direct_ru, 
         if opcode == 7:
             payload = json.dumps(vpn_sites).encode("ascii")
             request += struct.pack("!BH", cloudflare, len(payload)) + payload
-        connection, response = service_request(request, (b"\x01", b"\x03", b"\x04"))
+        timeout = 35 if max(len(direct_sites), len(vpn_sites)) > 8 else 10
+        connection, response = service_request(request, (b"\x01", b"\x03", b"\x04"), timeout=timeout)
         if response != b"\x01":
             connection.close()
             if response == b"\x03":
@@ -472,7 +477,7 @@ def stop_terminal():
 
 def parse_site_hosts(value, invalid):
     hosts = {}
-    if len(value) > 4096:
+    if len(value) > 8192:
         raise ProfileError(invalid)
     for item in re.split(r"[,\n]", value):
         item = item.strip()
@@ -490,13 +495,12 @@ def parse_site_hosts(value, invalid):
                 or not all(re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", label) for label in labels)):
             raise ProfileError(invalid)
         hosts[host] = None
-        if len(hosts) > 8:
+        if len(hosts) > MAX_SPLIT_SITES:
             raise ProfileError(invalid)
     return list(hosts)
 
 
-def resolve_direct_sites(value, proxy_port=None):
-    hosts = parse_site_hosts(value, "Укажите до 8 доменов сайтов напрямую, через запятую.")
+def resolve_direct_sites(hosts, proxy_port=None):
     if urlsplit(CHECK_URL).hostname in hosts:
         raise ProfileError("Домен api.ipify.org нужен для проверки VPN и не может идти напрямую.")
     sites = []
@@ -525,11 +529,12 @@ def resolve_direct_sites(value, proxy_port=None):
 def connect(profile, allow_install, protect, direct_sites, direct_ru=False, previous_entry_ip=None, vpn_sites=None):
     only_hosts = ()
     if vpn_sites is not None:
-        only_hosts = parse_site_hosts(vpn_sites, "Укажите до 8 доменов для VPN через запятую.")
+        only_hosts = parse_site_hosts(vpn_sites, "Укажите до 20 доменов для VPN через запятую.")
         if not only_hosts:
             raise ProfileError("Добавьте хотя бы один сайт в список «Выбранные сайты через VPN».")
         direct_sites = ""
         direct_ru = False
+    direct_hosts = parse_site_hosts(direct_sites, "Укажите до 20 доменов сайтов напрямую, через запятую.")
     storage = Path.home() / "Library/Application Support/VLESS VPN"
     storage.mkdir(mode=0o700, parents=True, exist_ok=True)
     with (storage / "connection.lock").open("a") as lock:
@@ -539,8 +544,9 @@ def connect(profile, allow_install, protect, direct_sites, direct_ru=False, prev
             raise ProfileError("VLESS VPN уже запускает или поддерживает подключение.") from error
         if tunnel_exists():
             raise ProfileError("Этот системный туннель уже запущен. Отключите его в приложении перед новым подключением.")
-        prepare_service(allow_install, split=bool(direct_sites.strip(" ,\t\r\n")), direct_ru=direct_ru,
-                        cloudflare=bool(profile.get("cloudflareHost")), vpn_sites=bool(only_hosts))
+        prepare_service(allow_install, split=bool(direct_hosts), direct_ru=direct_ru,
+                        cloudflare=bool(profile.get("cloudflareHost")), vpn_sites=bool(only_hosts),
+                        extended_split=max(len(direct_hosts), len(only_hosts)) > 8)
         blocked = protection_blocked()
         endpoint = None
         if blocked and previous_entry_ip is not None:
@@ -550,7 +556,7 @@ def connect(profile, allow_install, protect, direct_sites, direct_ru=False, prev
                 pass
         site_cache = storage / "direct-sites-cache.json"
         sites = [] if only_hosts else None
-        deferred_sites = ""
+        deferred_sites = []
         if blocked and sites is None:
             try:
                 cached = json.loads(site_cache.read_text())
@@ -561,9 +567,9 @@ def connect(profile, allow_install, protect, direct_sites, direct_ru=False, prev
         if sites is None:
             if blocked:
                 # The firewall only permits the VPS before the TUN is ready.
-                sites, deferred_sites = [], direct_sites
+                sites, deferred_sites = [], direct_hosts
             else:
-                sites = resolve_direct_sites(direct_sites)
+                sites = resolve_direct_sites(direct_hosts)
                 try:
                     site_cache.write_text(json.dumps({"input": direct_sites, "sites": sites}))
                 except OSError:
@@ -714,7 +720,7 @@ def monitor_connection(service, proxy, bridge, app_pid, upstream_ip, probe_port=
 
 
 def run_connection(profile, protect, direct_sites, direct_ru, app_pid, previous_endpoint=None,
-                   vpn_sites=(), deferred_sites=""):
+                   vpn_sites=(), deferred_sites=()):
     if tunnel_exists():
         raise ProfileError("Этот системный туннель уже запущен. Отключите его в приложении перед новым подключением.")
     cloudflare_host = profile.get("cloudflareHost")
