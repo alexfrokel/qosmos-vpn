@@ -21,6 +21,31 @@ enum AppBuild {
     static let directSites = Bundle.main.object(forInfoDictionaryKey: "QosmosDirectSites") as? String ?? ""
 }
 
+private final class UpdateDownloadDelegate: NSObject, URLSessionDownloadDelegate, @unchecked Sendable {
+    private let progress: (Int?) -> Void
+    private let finished: (URL?, URLResponse?) -> Void
+
+    init(progress: @escaping (Int?) -> Void, finished: @escaping (URL?, URLResponse?) -> Void) {
+        self.progress = progress
+        self.finished = finished
+    }
+
+    func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didWriteData bytesWritten: Int64,
+                    totalBytesWritten: Int64, totalBytesExpectedToWrite: Int64) {
+        let percentage = totalBytesExpectedToWrite > 0
+            ? Int(min(100, 100 * Double(totalBytesWritten) / Double(totalBytesExpectedToWrite))) : nil
+        progress(percentage)
+    }
+
+    func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didFinishDownloadingTo location: URL) {
+        finished(location, downloadTask.response)
+    }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+        if error != nil { finished(nil, task.response) }
+    }
+}
+
 final class AppPreferences: ObservableObject {
     private let defaults: UserDefaults
     private let directory: URL
@@ -59,6 +84,7 @@ final class AppPreferences: ObservableObject {
     @Published private(set) var updateMessage: String?
     @Published private(set) var availableUpdate: Release?
     @Published private(set) var installingUpdate = false
+    @Published private(set) var downloadPercent: Int?
 
     init(defaults: UserDefaults = .standard, directory: URL? = nil) {
         self.defaults = defaults
@@ -209,7 +235,7 @@ final class AppPreferences: ObservableObject {
         task.resume()
     }
 
-    func installUpdate(restart: @escaping (URL) throws -> Void) {
+    func installUpdate(restart: @escaping (URL, @escaping (Error) -> Void) -> Void) {
         guard !installingUpdate, let release = availableUpdate, let checksum = release.checksum,
               let url = Self.httpsURL(release.url) else { return }
         let target = Bundle.main.bundleURL.resolvingSymlinksInPath()
@@ -220,12 +246,17 @@ final class AppPreferences: ObservableObject {
         }
         installingUpdate = true
         updateMessage = "Загружаем обновление…"
+        downloadPercent = 0
         var request = URLRequest(url: url, timeoutInterval: 60)
         request.cachePolicy = .reloadIgnoringLocalCacheData
         let configuration = URLSessionConfiguration.ephemeral
         configuration.timeoutIntervalForResource = 900
-        let session = URLSession(configuration: configuration)
-        session.downloadTask(with: request) { [weak self] file, response, _ in
+        let delegate = UpdateDownloadDelegate(progress: { [weak self] percent in
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.downloadPercent != percent else { return }
+                self.downloadPercent = percent
+            }
+        }, finished: { [weak self] file, response in
             let staging = parent.appendingPathComponent(".qosmos-update-\(UUID().uuidString)", isDirectory: true)
             do {
                 guard let file, let response = response as? HTTPURLResponse,
@@ -240,7 +271,7 @@ final class AppPreferences: ObservableObject {
                     throw AppError(message: "Не удалось подготовить обновление.")
                 }
                 try manager.copyItem(at: script, to: staging.appendingPathComponent("update_installer.py"))
-                DispatchQueue.main.async { self?.updateMessage = "Проверяем обновление…" }
+                DispatchQueue.main.async { self?.showUpdateStep("Проверяем обновление…") }
                 let installer = Self.installer(staging, ["prepare", target.path, release.version, checksum])
                 try installer.run()
                 installer.waitUntilExit()
@@ -248,10 +279,7 @@ final class AppPreferences: ObservableObject {
                     throw AppError(message: "Проверка обновления не пройдена.")
                 }
                 DispatchQueue.main.async {
-                    do {
-                        try restart(staging)
-                        self?.updateMessage = "Устанавливаем обновление…"
-                    } catch {
+                    restart(staging) { [weak self] error in
                         try? FileManager.default.removeItem(at: staging)
                         self?.finishUpdate(error)
                     }
@@ -260,13 +288,20 @@ final class AppPreferences: ObservableObject {
                 try? FileManager.default.removeItem(at: staging)
                 DispatchQueue.main.async { self?.finishUpdate(error) }
             }
-        }.resume()
+        })
+        let session = URLSession(configuration: configuration, delegate: delegate, delegateQueue: nil)
+        session.downloadTask(with: request).resume()
         session.finishTasksAndInvalidate()
+    }
+
+    func showUpdateStep(_ message: String) {
+        downloadPercent = nil
+        updateMessage = message
     }
 
     private func finishUpdate(_ error: Error) {
         installingUpdate = false
-        updateMessage = (error as? AppError)?.message ?? "Не удалось подготовить обновление."
+        showUpdateStep((error as? AppError)?.message ?? "Не удалось подготовить обновление.")
     }
 
     static func installer(_ staging: URL, _ arguments: [String]) -> Process {
@@ -496,6 +531,18 @@ struct QosmosSettingsView: View {
                         Link(preferences.text("Скачать"), destination: url)
                     }
                 }
+            }
+            if preferences.installingUpdate, let percent = preferences.downloadPercent {
+                HStack(spacing: 10) {
+                    ProgressView(value: Double(percent), total: 100)
+                        .animation(.easeOut(duration: 0.2), value: percent)
+                    Text("\(percent)%").monospacedDigit()
+                }
+                .font(.caption)
+                .accessibilityLabel(preferences.text("Загрузка обновления"))
+                .accessibilityValue("\(percent)%")
+            } else if preferences.installingUpdate {
+                ProgressView().controlSize(.small)
             }
             if let message = preferences.updateMessage {
                 Text(preferences.text(message)).font(.caption).foregroundStyle(.secondary)

@@ -89,10 +89,11 @@ final class VPNModel: ObservableObject {
     private var activeRequest: ConnectionRequest?
     private var ipCheckID: UUID?
     private var quitCompletion: (() -> Void)?
+    private var updateShutdownTimeout: DispatchWorkItem?
     private let storage: URL
     private let defaults: UserDefaults
     private let worker = DispatchQueue(label: "local.vlessvpn.backend", qos: .userInitiated)
-    private(set) var restartingForUpdate = false
+    var isStoppingForUpdate: Bool { updateShutdownTimeout != nil }
 
     init(defaults: UserDefaults = .standard, directory: URL? = nil) {
         self.defaults = defaults
@@ -497,21 +498,47 @@ final class VPNModel: ObservableObject {
 
     func quit(afterDisconnect completion: @escaping () -> Void) {
         quitCompletion = completion
-        disconnect(keepingProtection: restartingForUpdate)
+        disconnect()
     }
 
-    func restartForUpdate(_ staging: URL) throws {
+    func restartForUpdate(_ staging: URL, onFailure: @escaping (Error) -> Void) {
         guard !provisioning, !importBusy, state != .disconnecting else {
-            throw AppError(message: "Дождитесь завершения текущего действия и повторите обновление.")
+            onFailure(AppError(message: "Дождитесь завершения текущего действия и повторите обновление."))
+            return
         }
         let resume = isRunning && !isIdle
-        let installer = AppPreferences.installer(staging, [
-            "install", Bundle.main.bundleURL.resolvingSymlinksInPath().path,
-            String(ProcessInfo.processInfo.processIdentifier), resume ? "resume" : "idle",
-        ])
-        try installer.run()
-        restartingForUpdate = true
-        NSApp.terminate(nil)
+        let restart = { [weak self] in
+            guard let self else { return }
+            let installer = AppPreferences.installer(staging, [
+                "install", Bundle.main.bundleURL.resolvingSymlinksInPath().path,
+                String(ProcessInfo.processInfo.processIdentifier), resume ? "resume" : "idle",
+            ])
+            do {
+                try installer.run()
+                self.preferences.showUpdateStep("Перезапускаем Qosmos VPN…")
+                DispatchQueue.main.async { NSApp.terminate(nil) }
+            } catch {
+                onFailure(error)
+                if resume { self.connect(allowInstall: false) }
+            }
+        }
+        guard isRunning else { restart(); return }
+        preferences.showUpdateStep("Приостанавливаем VPN для обновления…")
+        let timeout = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.updateShutdownTimeout = nil
+            self.quitCompletion = nil
+            onFailure(AppError(message: "VPN не успел остановиться. Повторите обновление."))
+        }
+        updateShutdownTimeout = timeout
+        // Finish on the regular AppKit run loop before asking it to terminate.
+        quitCompletion = { [weak self] in
+            self?.updateShutdownTimeout?.cancel()
+            self?.updateShutdownTimeout = nil
+            restart()
+        }
+        disconnect(keepingProtection: true)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 25, execute: timeout)
     }
 
     private func consume(_ event: BackendEvent) {
@@ -566,8 +593,8 @@ final class VPNModel: ObservableObject {
         state = stoppingTerminal && status != 0 ? .terminalConnected : .idle
         let completion = quitCompletion
         quitCompletion = nil
-        completion?()
-        refreshTerminal(refreshIP: true)
+        if let completion { completion() }
+        else { refreshTerminal(refreshIP: true) }
     }
 
     static func makeBackend(_ arguments: [String], resource: String = "backend") throws -> (Process, Pipe, Pipe) {
@@ -1164,10 +1191,10 @@ final class VPNDelegate: NSObject, NSApplicationDelegate {
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        if model.provisioning { return .terminateCancel }
+        if model.provisioning || model.isStoppingForUpdate { return .terminateCancel }
         guard model.isRunning else { return .terminateNow }
-        model.quit(afterDisconnect: { sender.reply(toApplicationShouldTerminate: true) })
-        return .terminateLater
+        model.quit(afterDisconnect: { DispatchQueue.main.async { sender.terminate(nil) } })
+        return .terminateCancel
     }
 }
 

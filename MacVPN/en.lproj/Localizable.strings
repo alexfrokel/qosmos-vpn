@@ -84,11 +84,14 @@
 "Для этой версии недоступна установка из приложения." = "This release does not support in-app installation.";
 "Переместите Qosmos VPN в папку, доступную для записи." = "Move Qosmos VPN to a folder you can write to.";
 "Загружаем обновление…" = "Downloading the update…";
+"Загрузка обновления" = "Update download";
+"Приостанавливаем VPN для обновления…" = "Pausing the VPN for the update…";
+"Перезапускаем Qosmos VPN…" = "Restarting Qosmos VPN…";
+"VPN не успел остановиться. Повторите обновление." = "The VPN did not stop in time. Try updating again.";
 "Не удалось загрузить обновление." = "Could not download the update.";
 "Не удалось подготовить обновление." = "Could not prepare the update.";
 "Проверяем обновление…" = "Verifying the update…";
 "Проверка обновления не пройдена." = "The update could not be verified.";
-"Устанавливаем обновление…" = "Installing the update…";
 "Дождитесь завершения текущего действия и повторите обновление." = "Wait for the current operation to finish, then try again.";
 "Не удалось установить обновление. Запущена предыдущая версия." = "The update could not be installed. The previous version has reopened.";
 "Сохранить" = "Save";
