@@ -12,7 +12,7 @@ iconset="$build/AppIcon.iconset"
 mkdir -p "$app/Contents/MacOS" "$resources/en.lproj" "$module_cache" "$iconset"
 
 install -m 0644 "$source_dir/backend.py" "$resources/backend.py"
-for file in server_setup.py server-setup-entry.sh server-setup-exit.sh; do
+for file in server_setup.py server-setup-entry.sh server-setup-exit.sh update_installer.py; do
     install -m 0644 "$source_dir/$file" "$resources/$file"
 done
 install -m 0644 "$source_dir/Info.plist" "$app/Contents/Info.plist"
@@ -51,7 +51,7 @@ xcrun swiftc -target "$swift_target" -O -module-cache-path "$module_cache" \
     -o "$service_dir/tunnel-service"
 codesign --force --sign - "$service_dir/tunnel-service" "$service_dir/sing-box"
 COPYFILE_DISABLE=1 pkgbuild --root "$package_root" --scripts "$source_dir/tunnel-installer" \
-    --install-location / --ownership recommended --identifier local.vlessvpn.tunnel.pkg --version 7 \
+    --install-location / --ownership recommended --identifier local.vlessvpn.tunnel.pkg --version 8 \
     "$resources/Qosmos Tunnel.pkg"
 xcrun swiftc -target "$swift_target" -parse-as-library -O -module-cache-path "$module_cache" \
     "$source_dir/VlessVPN.swift" "$source_dir/AppSettings.swift" "$source_dir/ServerSetup.swift" \

@@ -135,7 +135,7 @@ private func installTunnelDNS() throws -> SCDynamicStore {
     return store
 }
 
-private func tunnelConfig(address: [UInt8], port: Int, split: SplitTunnel?, cloudflare: Bool) throws -> Data {
+private func tunnelConfig(address: [UInt8], port: Int, split: SplitTunnel?, cloudflare: Bool, uid: uid_t) throws -> Data {
     // Only the root-owned template controls the engine's other settings.
     let template = try Data(contentsOf: directory.appendingPathComponent("tun-template.json"))
     guard var config = try JSONSerialization.jsonObject(with: template) as? [String: Any],
@@ -152,7 +152,7 @@ private func tunnelConfig(address: [UInt8], port: Int, split: SplitTunnel?, clou
     outbounds[0]["server_port"] = port
     config["inbounds"] = inbounds
     config["outbounds"] = outbounds
-    try split?.configure(&config)
+    try split?.configure(&config, uid: uid)
     return try JSONSerialization.data(withJSONObject: config)
 }
 
@@ -182,16 +182,30 @@ private func serve(_ peer: Int32, uid: uid_t) throws {
         try KillSwitch.clear()
         _ = send(ready, to: peer)
         return
-    case 3, 4, 5, 6:
+    case 3, 4, 5, 6, 7:
         break
     default:
         throw ServiceError.invalidRequest
     }
     let request = try TunnelRequest(peer: peer)
-    let cloudflare = opcode == 6
+    var cloudflare = opcode == 6
     let split: SplitTunnel?
     do {
-        if opcode == 4 || opcode == 5 || cloudflare {
+        if opcode == 7 {
+            let flag = try readBytes(1, from: peer)[0]
+            guard flag <= 1 else { throw ServiceError.invalidRequest }
+            cloudflare = flag == 1
+            if cloudflare {
+                guard request.address.count == 4, request.serverPort == 443 else { throw ServiceError.invalidRequest }
+            }
+            let length = try readBytes(2, from: peer)
+            let count = Int(length[0]) * 256 + Int(length[1])
+            guard (1...4096).contains(count) else { throw ServiceError.invalidRequest }
+            let hosts = try JSONDecoder().decode([String].self, from: Data(readBytes(count, from: peer)))
+            guard !hosts.isEmpty else { throw ServiceError.invalidRequest }
+            split = try SplitTunnel(sites: [], directRuSites: false, cloudflareEdge: cloudflare ? request.endpoint : nil,
+                                    vpnSites: hosts)
+        } else if opcode == 4 || opcode == 5 || cloudflare {
             var directRu = opcode == 5
             if cloudflare {
                 let flag = try readBytes(1, from: peer)[0]
@@ -219,17 +233,8 @@ private func serve(_ peer: Int32, uid: uid_t) throws {
     let working = URL(fileURLWithPath: String(cString: template), isDirectory: true)
     defer { try? FileManager.default.removeItem(at: working) }
     let path = working.appendingPathComponent("tun.json")
-    try tunnelConfig(address: request.address, port: request.proxyPort, split: split, cloudflare: cloudflare).write(to: path)
+    try tunnelConfig(address: request.address, port: request.proxyPort, split: split, cloudflare: cloudflare, uid: uid).write(to: path)
     if keepProtection { try KillSwitch.arm(blockedRules) }
-    defer {
-        if keepProtection {
-            do {
-                try KillSwitch.replace(blockedRules)
-                if let split { try KillSwitch.clearDirectStates(split) }
-            }
-            catch { NSLog("Qosmos VPN could not change Kill Switch rules") }
-        }
-    }
 
     let engine = Process()
     engine.executableURL = directory.appendingPathComponent("sing-box")
@@ -259,6 +264,15 @@ private func serve(_ peer: Int32, uid: uid_t) throws {
         throw error
     }
     defer { split?.removeRoutes(addedRoutes) }
+    defer {
+        if keepProtection {
+            do {
+                try KillSwitch.replace(blockedRules)
+                if let split { try KillSwitch.clearDirectStates(split) }
+            }
+            catch { NSLog("Qosmos VPN could not change Kill Switch rules") }
+        }
+    }
     if keepProtection {
         try KillSwitch.replace(KillSwitch.rules(endpoint: request.endpoint, port: request.serverPort, uid: uid, tunnel: device, split: split))
     }

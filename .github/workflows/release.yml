@@ -50,14 +50,20 @@ jobs:
           mkdir -p dist
           ditto -c -k --keepParent "$QOSMOS_BUILD_DIR/Qosmos VPN.app" dist/Qosmos-VPN-macOS-arm64.zip
           /usr/bin/python3 - <<'PY'
-          import json, os
+          import hashlib, json, os
           from pathlib import Path
           version = os.environ["QOSMOS_VERSION"]
           tag = f"v{version}"
           repo = os.environ["GITHUB_REPOSITORY"]
+          archive = Path("dist/Qosmos-VPN-macOS-arm64.zip")
+          digest = hashlib.sha256()
+          with archive.open("rb") as file:
+              for chunk in iter(lambda: file.read(1024 * 1024), b""):
+                  digest.update(chunk)
           Path("dist/qosmos-update.json").write_text(json.dumps({
               "version": version,
               "url": f"https://github.com/{repo}/releases/download/{tag}/Qosmos-VPN-macOS-arm64.zip",
+              "sha256": digest.hexdigest(),
           }) + "\n")
           PY
           cp MacVPN/THIRD-PARTY.md dist/

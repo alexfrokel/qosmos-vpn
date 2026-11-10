@@ -19,7 +19,7 @@ struct KillSwitch {
                 let destinations = split.addresses.joined(separator: ", ")
                 lines.append("\(rule) to { \(destinations) } \(web)")
             }
-            if split.directRuSites {
+            if split.directRuSites || !split.vpnSites.isEmpty {
                 lines.insert("table <qosmos_non_public_v4> { \(SplitTunnel.nonPublicIPv4.joined(separator: ", ")) }", at: 0)
                 lines.append("\(rule) to ! <qosmos_non_public_v4> \(web)")
             }
@@ -65,7 +65,7 @@ struct KillSwitch {
     }
 
     static func clearDirectStates(_ split: SplitTunnel) throws {
-        if split.directRuSites {
+        if split.directRuSites || !split.vpnSites.isEmpty {
             _ = try pf(["-i", split.interface, "-F", "states"])
         } else {
             for address in split.addresses { _ = try pf(["-k", "0.0.0.0/0", "-k", address]) }

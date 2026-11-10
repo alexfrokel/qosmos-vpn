@@ -58,7 +58,7 @@ struct AppError: LocalizedError {
 
 final class VPNModel: ObservableObject {
     enum State {
-        case idle, connecting, connected, terminalConnected, disconnecting
+        case idle, connecting, connected, reconnecting, terminalConnected, disconnecting
     }
 
     @Published private(set) var profiles: [SavedProfile] = []
@@ -84,11 +84,15 @@ final class VPNModel: ObservableObject {
     private var backend: Process?
     private var terminalCheckPending = false
     private var autoConnectPending = false
+    private var resumeAfterUpdate = false
+    private var reconnectWithSettingsPending = false
+    private var activeRequest: ConnectionRequest?
     private var ipCheckID: UUID?
     private var quitCompletion: (() -> Void)?
     private let storage: URL
     private let defaults: UserDefaults
     private let worker = DispatchQueue(label: "local.vlessvpn.backend", qos: .userInitiated)
+    private(set) var restartingForUpdate = false
 
     init(defaults: UserDefaults = .standard, directory: URL? = nil) {
         self.defaults = defaults
@@ -115,41 +119,68 @@ final class VPNModel: ObservableObject {
     var isIdle: Bool { state == .idle }
     var isRunning: Bool { backend != nil }
     var isConnected: Bool { state == .connected || state == .terminalConnected }
+    var showsVPNExitIP: Bool { state == .connected && activeRequest?.vpnSites != nil }
     var canToggle: Bool {
-        state != .disconnecting && !importBusy && !provisioning && (!isIdle || internetBlocked || selectedProfile != nil)
+        state != .disconnecting && !importBusy && !provisioning && (!isIdle || selectedProfile != nil)
     }
     var stateLabel: String {
         switch state {
         case .idle: return internetBlocked ? "Интернет заблокирован" : "Отключено"
         case .connecting: return "Подключение"
+        case .reconnecting: return "Переподключение"
         case .connected, .terminalConnected: return "Подключено"
         case .disconnecting: return "Отключение"
         }
     }
-    var actionLabel: String { isIdle ? (internetBlocked ? "Вернуть доступ" : "Подключить") : "Отключить" }
+    var actionLabel: String {
+        if state == .reconnecting { return "Остановить переподключение" }
+        return isIdle ? "Подключить" : "Отключить"
+    }
 
     func toggleConnection() {
         guard canToggle else { return }
-        if isIdle && internetBlocked {
-            state = .disconnecting
-            startBackend("release-protection")
-        } else if isIdle {
+        if isIdle {
             connect()
         } else {
             disconnect()
         }
     }
 
-    func prepareLaunch() {
-        autoConnectPending = preferences.autoConnect
+    func reconnect() {
+        guard state == .connected, let backend, backend.isRunning,
+              kill(backend.processIdentifier, SIGUSR1) == 0 else { return }
+        state = .reconnecting
+        detail = "Восстанавливаем соединение с VPN…"
+    }
+
+    func reconnectWithCurrentSettings() {
+        guard state == .connected, let request = connectionRequest, let activeRequest else { return }
+        if request.profile == activeRequest.profile && request.directSites == activeRequest.directSites
+            && request.directRuSites == activeRequest.directRuSites && request.vpnSites == activeRequest.vpnSites {
+            reconnect()
+        } else {
+            reconnectWithSettingsPending = true
+            disconnect(keepingProtection: true)
+        }
+    }
+
+    func restoreInternet() {
+        guard isIdle, internetBlocked else { return }
+        state = .disconnecting
+        startBackend("release-protection")
+    }
+
+    func prepareLaunch(resumeAfterUpdate: Bool = false) {
+        self.resumeAfterUpdate = resumeAfterUpdate
+        autoConnectPending = resumeAfterUpdate || preferences.autoConnect
         if preferences.autoUpdates { preferences.checkForUpdates() }
         preferences.record("Application launched")
-        refreshTerminal()
-        refreshPublicIP()
+        refreshTerminal(refreshIP: true)
     }
 
     func refreshPublicIP() {
-        guard state != .connecting, state != .disconnecting, !internetBlocked, !checkingIP else { return }
+        guard state != .connecting, state != .reconnecting, state != .disconnecting,
+              !internetBlocked, !terminalCheckPending, !checkingIP, !showsVPNExitIP else { return }
         let checkID = UUID()
         ipCheckID = checkID
         checkingIP = true
@@ -175,7 +206,7 @@ final class VPNModel: ObservableObject {
         }
     }
 
-    func refreshTerminal() {
+    func refreshTerminal(refreshIP: Bool = false) {
         guard (isIdle || state == .terminalConnected), !importBusy, !terminalCheckPending else { return }
         terminalCheckPending = true
         worker.async { [weak self] in
@@ -197,14 +228,13 @@ final class VPNModel: ObservableObject {
                 guard let status, !self.importBusy, self.isIdle || self.state == .terminalConnected else { return }
                 let active = status == "active"
                 let blocked = status == "blocked"
+                let protectionReleased = self.internetBlocked && !blocked
                 if blocked != self.internetBlocked {
                     self.internetBlocked = blocked
                     if blocked {
                         self.exitIP = nil
                         self.ipCheckID = nil
                         self.checkingIP = false
-                    } else {
-                        self.refreshPublicIP()
                     }
                 }
                 if active && self.isIdle {
@@ -218,7 +248,17 @@ final class VPNModel: ObservableObject {
                 }
                 if self.autoConnectPending {
                     self.autoConnectPending = false
-                    if !active && !blocked && self.isIdle { self.connect(allowInstall: false) }
+                    if !active && (!blocked || self.resumeAfterUpdate) && self.isIdle {
+                        self.connect(allowInstall: false)
+                    }
+                    self.resumeAfterUpdate = false
+                }
+                if self.reconnectWithSettingsPending {
+                    self.reconnectWithSettingsPending = false
+                    if !active && self.isIdle { self.connect() }
+                }
+                if refreshIP || protectionReleased {
+                    self.refreshPublicIP()
                 }
             }
         }
@@ -368,18 +408,29 @@ final class VPNModel: ObservableObject {
         let profile: Profile
         let directSites: String
         let directRuSites: Bool
+        let previousEntryIP: String?
+        let vpnSites: String?
+    }
+
+    private var connectionRequest: ConnectionRequest? {
+        guard let profile = selectedProfile else { return nil }
+        let only = preferences.splitMode == .only
+        return ConnectionRequest(
+            profile: profile, directSites: only ? "" : preferences.directSites,
+            directRuSites: !only && preferences.directRuSites,
+            previousEntryIP: profiles.first(where: { $0.id == selection })?.entryIP,
+            vpnSites: only ? preferences.vpnSites : nil
+        )
     }
 
     func connect(allowInstall: Bool = true) {
-        guard isIdle, !importBusy, !provisioning, let profile = selectedProfile else { return }
-        let request = ConnectionRequest(
-            profile: profile, directSites: preferences.directSites, directRuSites: preferences.directRuSites
-        )
+        guard isIdle, !importBusy, !provisioning, let request = connectionRequest else { return }
         guard let payload = try? JSONEncoder().encode(request) else {
             errorMessage = "Не удалось прочитать выбранный профиль."
             return
         }
-        state = .connecting
+        state = internetBlocked ? .reconnecting : .connecting
+        activeRequest = request
         preferences.record("Connection requested")
         detail = "Проверяем профиль и соединение с сервером…"
         exitIP = nil
@@ -425,7 +476,7 @@ final class VPNModel: ObservableObject {
         }
     }
 
-    func disconnect() {
+    func disconnect(keepingProtection: Bool = false) {
         if state == .terminalConnected {
             preferences.record("Terminal VPN stop requested")
             state = .disconnecting
@@ -434,21 +485,43 @@ final class VPNModel: ObservableObject {
             return
         }
         guard let backend, state != .disconnecting else { return }
+        let keepProtection = keepingProtection || state == .reconnecting
         preferences.record("Disconnection requested")
         state = .disconnecting
         detail = "Останавливаем системный туннель…"
-        if backend.isRunning { backend.terminate() }
+        if backend.isRunning {
+            if keepProtection { backend.interrupt() }
+            else { backend.terminate() }
+        }
     }
 
     func quit(afterDisconnect completion: @escaping () -> Void) {
         quitCompletion = completion
-        disconnect()
+        disconnect(keepingProtection: restartingForUpdate)
+    }
+
+    func restartForUpdate(_ staging: URL) throws {
+        guard !provisioning, !importBusy, state != .disconnecting else {
+            throw AppError(message: "Дождитесь завершения текущего действия и повторите обновление.")
+        }
+        let resume = isRunning && !isIdle
+        let installer = AppPreferences.installer(staging, [
+            "install", Bundle.main.bundleURL.resolvingSymlinksInPath().path,
+            String(ProcessInfo.processInfo.processIdentifier), resume ? "resume" : "idle",
+        ])
+        try installer.run()
+        restartingForUpdate = true
+        NSApp.terminate(nil)
     }
 
     private func consume(_ event: BackendEvent) {
         switch event.kind {
         case "progress":
             if state != .disconnecting { detail = event.message }
+        case "reconnecting":
+            guard state != .disconnecting else { return }
+            state = .reconnecting
+            detail = event.message
         case "connected":
             guard state != .disconnecting else { return }
             state = .connected
@@ -488,13 +561,13 @@ final class VPNModel: ObservableObject {
             detail = "Подключение остановилось."
         }
         backend = nil
+        activeRequest = nil
         exitIP = nil
         state = stoppingTerminal && status != 0 ? .terminalConnected : .idle
         let completion = quitCompletion
         quitCompletion = nil
         completion?()
-        refreshTerminal()
-        refreshPublicIP()
+        refreshTerminal(refreshIP: true)
     }
 
     static func makeBackend(_ arguments: [String], resource: String = "backend") throws -> (Process, Pipe, Pipe) {
@@ -534,7 +607,9 @@ struct VPNView: View {
     private let accent = Color(red: 1.0, green: 0.68, blue: 0.46)
 
     private var connected: Bool { model.isConnected }
-    private var busy: Bool { model.state == .connecting || model.state == .disconnecting }
+    private var busy: Bool {
+        model.state == .connecting || model.state == .reconnecting || model.state == .disconnecting
+    }
 
     private var heading: some View {
         HStack(spacing: 11) {
@@ -631,6 +706,13 @@ struct VPNView: View {
                 .multilineTextAlignment(.center)
                 .frame(minHeight: 34, alignment: .top)
                 .fixedSize(horizontal: false, vertical: true)
+            if model.state == .connected {
+                Button(preferences.text("Переподключить"), action: model.reconnectWithCurrentSettings)
+                    .buttonStyle(.link)
+            } else if model.isIdle && model.internetBlocked {
+                Button(preferences.text("Вернуть доступ"), action: model.restoreInternet)
+                    .buttonStyle(.link)
+            }
         }
         .frame(maxWidth: .infinity)
         .animation(.easeOut(duration: 0.18), value: connected)
@@ -642,7 +724,7 @@ struct VPNView: View {
                 .font(.system(size: 15, weight: .medium))
                 .foregroundStyle(accent)
                 .accessibilityHidden(true)
-            Text(preferences.text("Ваш IP"))
+            Text(preferences.text(model.showsVPNExitIP ? "IP выхода VPN" : "Ваш IP"))
                 .font(.system(size: 13, weight: .medium))
                 .foregroundStyle(muted)
             Spacer()
@@ -660,7 +742,7 @@ struct VPNView: View {
             .foregroundStyle(muted)
             .help(preferences.text("Обновить IP"))
             .accessibilityLabel(preferences.text("Обновить IP"))
-            .disabled(busy || model.checkingIP)
+            .disabled(busy || model.checkingIP || model.showsVPNExitIP)
         }
         .padding(.leading, 14)
         .padding(.trailing, 8)
@@ -1053,11 +1135,18 @@ final class VPNDelegate: NSObject, NSApplicationDelegate {
         if let index = args.firstIndex(of: "--import"), args.indices.contains(index + 1) {
             model.importFile(URL(fileURLWithPath: args[index + 1]))
         }
-        model.prepareLaunch()
+        let updateLaunch = args.contains("--update-installed") || args.contains("--update-failed")
+        if args.contains("--update-failed") {
+            model.errorMessage = "Не удалось установить обновление. Запущена предыдущая версия."
+        }
+        model.prepareLaunch(resumeAfterUpdate: args.contains("--resume-after-update"))
+        NSWorkspace.shared.notificationCenter.addObserver(
+            self, selector: #selector(didWake), name: NSWorkspace.didWakeNotification, object: nil
+        )
         terminalMonitor = Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { [weak self] _ in
             self?.model.refreshTerminal()
         }
-        if loginLaunch && model.preferences.loginRegistered && model.preferences.launchMinimized {
+        if !updateLaunch && loginLaunch && model.preferences.loginRegistered && model.preferences.launchMinimized {
             DispatchQueue.main.async { NSApp.hide(nil) }
         } else {
             NSApp.activate(ignoringOtherApps: true)
@@ -1066,9 +1155,11 @@ final class VPNDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidBecomeActive(_ notification: Notification) {
         model.preferences.refreshLoginStatus()
-        model.refreshTerminal()
-        model.refreshPublicIP()
+        if model.state == .connected { model.refreshPublicIP() }
+        else { model.refreshTerminal(refreshIP: true) }
     }
+
+    @objc private func didWake(_ notification: Notification) { model.reconnect() }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
 
@@ -1089,11 +1180,16 @@ private struct VPNMenu: View {
         Text("Qosmos VPN v\(AppBuild.version)")
         Text(preferences.text(model.stateLabel))
         if let ip = model.exitIP {
-            Text("\(preferences.text("Ваш IP"))  \(ip)")
+            Text("\(preferences.text(model.showsVPNExitIP ? "IP выхода VPN" : "Ваш IP"))  \(ip)")
         }
         Divider()
         Button(preferences.text(model.actionLabel), action: model.toggleConnection)
             .disabled(!model.canToggle)
+        if model.state == .connected {
+            Button(preferences.text("Переподключить"), action: model.reconnectWithCurrentSettings)
+        } else if model.isIdle && model.internetBlocked {
+            Button(preferences.text("Вернуть доступ"), action: model.restoreInternet)
+        }
         Button(preferences.text("Открыть Qosmos VPN")) { showWindow(settings: false) }
         Button(preferences.text("Настройки…")) { showWindow(settings: true) }
         Divider()

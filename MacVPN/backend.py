@@ -24,6 +24,8 @@ RESOURCES = Path(__file__).resolve().parent
 XRAY = RESOURCES / "xray"
 SING_BOX = RESOURCES / "sing-box"
 CHECK_URL = "https://api.ipify.org/"
+HEALTH_CHECK_INTERVAL = 20
+wake_requested = False
 TUN_IPV4 = "198.18.10.1"
 SERVICE = Path("/Library/Application Support/QosmosVPN")
 SERVICE_SOCKET = SERVICE / "tunnel.sock"
@@ -31,6 +33,7 @@ SERVICE_READY = SERVICE / "tunnel-dns-v3"
 SPLIT_SERVICE_READY = SERVICE / "tunnel-split-v5"
 RU_SPLIT_SERVICE_READY = SERVICE / "tunnel-split-ru-v6"
 CLOUDFLARE_SERVICE_READY = SERVICE / "tunnel-cloudflare-v7"
+VPN_SITES_SERVICE_READY = SERVICE / "tunnel-vpn-sites-v8"
 PREVIOUS_SERVICE_READY = SERVICE / "kill-switch-v2"
 AUTHORIZE = """on run argv
     return do shell script (item 1 of argv) with administrator privileges
@@ -320,10 +323,12 @@ def run_admin(arguments, failure, include_error=False):
     return result.stdout
 
 
-def prepare_service(allow_install, split=False, direct_ru=False, cloudflare=False):
+def prepare_service(allow_install, split=False, direct_ru=False, cloudflare=False, vpn_sites=False):
     required = RU_SPLIT_SERVICE_READY if direct_ru else (SPLIT_SERVICE_READY if split else SERVICE_READY)
     if cloudflare:
         required = CLOUDFLARE_SERVICE_READY
+    if vpn_sites:
+        required = VPN_SITES_SERVICE_READY
     if not required.is_file():
         if not allow_install:
             raise ProfileError("Для автоподключения один раз подключитесь вручную и установите службу Qosmos VPN.")
@@ -372,17 +377,22 @@ def release_protection():
     connection.close()
 
 
-def start_tunnel(endpoint, port, server_port, protect, direct_sites, direct_ru, cloudflare=False):
+def start_tunnel(endpoint, port, server_port, protect, direct_sites, direct_ru, cloudflare=False, vpn_sites=()):
     try:
         opcode = 5 if direct_ru else (4 if direct_sites else 3)
         if cloudflare:
             opcode = 6
+        if vpn_sites:
+            opcode = 7
         request = struct.pack("!BB16sHHB", opcode, endpoint.version, endpoint.packed, port, server_port, protect)
         if opcode in (4, 5, 6):
             if cloudflare:
                 request += bytes([direct_ru])
             payload = json.dumps(direct_sites).encode("ascii")
             request += struct.pack("!H", len(payload)) + payload
+        if opcode == 7:
+            payload = json.dumps(vpn_sites).encode("ascii")
+            request += struct.pack("!BH", cloudflare, len(payload)) + payload
         connection, response = service_request(request, (b"\x01", b"\x03", b"\x04"))
         if response != b"\x01":
             connection.close()
@@ -460,9 +470,8 @@ def stop_terminal():
     raise ProfileError("Системный интерфейс VPN ещё не закрылся. Повторите проверку.")
 
 
-def resolve_direct_sites(value):
+def parse_site_hosts(value, invalid):
     hosts = {}
-    invalid = "Укажите до 8 доменов сайтов напрямую, через запятую."
     if len(value) > 4096:
         raise ProfileError(invalid)
     for item in re.split(r"[,\n]", value):
@@ -480,18 +489,32 @@ def resolve_direct_sites(value):
         if (len(host) > 253 or len(labels) < 2 or labels[-1].isdigit()
                 or not all(re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", label) for label in labels)):
             raise ProfileError(invalid)
-        if host == urlsplit(CHECK_URL).hostname:
-            raise ProfileError("Домен api.ipify.org нужен для проверки VPN и не может идти напрямую.")
         hosts[host] = None
         if len(hosts) > 8:
             raise ProfileError(invalid)
+    return list(hosts)
+
+
+def resolve_direct_sites(value, proxy_port=None):
+    hosts = parse_site_hosts(value, "Укажите до 8 доменов сайтов напрямую, через запятую.")
+    if urlsplit(CHECK_URL).hostname in hosts:
+        raise ProfileError("Домен api.ipify.org нужен для проверки VPN и не может идти напрямую.")
     sites = []
     for host in hosts:
         try:
-            records = socket.getaddrinfo(host, 443, socket.AF_INET, socket.SOCK_STREAM)
-        except OSError:
-            records = []
-        addresses = {ipaddress.IPv4Address(record[4][0]) for record in records}
+            if proxy_port is None:
+                records = socket.getaddrinfo(host, 443, socket.AF_INET, socket.SOCK_STREAM)
+                answers = [record[4][0] for record in records]
+            else:
+                response = subprocess.check_output([
+                    "/usr/bin/curl", "-q", "-fsS", "--max-time", "5", "--noproxy", "",
+                    "--proxy", f"socks5h://127.0.0.1:{proxy_port}", "-H", "accept: application/dns-json",
+                    f"https://cloudflare-dns.com/dns-query?name={host}&type=A",
+                ])
+                answers = [answer["data"] for answer in json.loads(response).get("Answer", []) if answer["type"] == 1]
+            addresses = {ipaddress.IPv4Address(answer) for answer in answers}
+        except (OSError, ValueError, TypeError, KeyError, subprocess.SubprocessError):
+            addresses = set()
         addresses = sorted(str(address) for address in addresses if address.is_global and not address.is_multicast)[:8]
         if not addresses:
             raise ProfileError("Не удалось получить публичный IPv4 для сайта из списка «Сайты напрямую».")
@@ -499,7 +522,14 @@ def resolve_direct_sites(value):
     return sites
 
 
-def connect(profile, allow_install, protect, direct_sites, direct_ru=False):
+def connect(profile, allow_install, protect, direct_sites, direct_ru=False, previous_entry_ip=None, vpn_sites=None):
+    only_hosts = ()
+    if vpn_sites is not None:
+        only_hosts = parse_site_hosts(vpn_sites, "Укажите до 8 доменов для VPN через запятую.")
+        if not only_hosts:
+            raise ProfileError("Добавьте хотя бы один сайт в список «Выбранные сайты через VPN».")
+        direct_sites = ""
+        direct_ru = False
     storage = Path.home() / "Library/Application Support/VLESS VPN"
     storage.mkdir(mode=0o700, parents=True, exist_ok=True)
     with (storage / "connection.lock").open("a") as lock:
@@ -509,11 +539,52 @@ def connect(profile, allow_install, protect, direct_sites, direct_ru=False):
             raise ProfileError("VLESS VPN уже запускает или поддерживает подключение.") from error
         if tunnel_exists():
             raise ProfileError("Этот системный туннель уже запущен. Отключите его в приложении перед новым подключением.")
-        sites = resolve_direct_sites(direct_sites)
-        prepare_service(allow_install, split=bool(sites), direct_ru=direct_ru,
-                        cloudflare=bool(profile.get("cloudflareHost")))
+        prepare_service(allow_install, split=bool(direct_sites.strip(" ,\t\r\n")), direct_ru=direct_ru,
+                        cloudflare=bool(profile.get("cloudflareHost")), vpn_sites=bool(only_hosts))
+        blocked = protection_blocked()
+        endpoint = None
+        if blocked and previous_entry_ip is not None:
+            try:
+                endpoint = ipaddress.ip_address(previous_entry_ip)
+            except ValueError:
+                pass
+        site_cache = storage / "direct-sites-cache.json"
+        sites = [] if only_hosts else None
+        deferred_sites = ""
+        if blocked and sites is None:
+            try:
+                cached = json.loads(site_cache.read_text())
+                if cached.get("input") == direct_sites:
+                    sites = cached["sites"]
+            except (OSError, ValueError, KeyError, AttributeError):
+                pass
+        if sites is None:
+            if blocked:
+                # The firewall only permits the VPS before the TUN is ready.
+                sites, deferred_sites = [], direct_sites
+            else:
+                sites = resolve_direct_sites(direct_sites)
+                try:
+                    site_cache.write_text(json.dumps({"input": direct_sites, "sites": sites}))
+                except OSError:
+                    pass
+        app_pid = os.getppid()
         try:
-            run_connection(profile, protect, sites, direct_ru)
+            has_connected = False
+            retry_delay = 0
+            while os.getppid() == app_pid:
+                try:
+                    endpoint = run_connection(profile, protect, sites, direct_ru, app_pid, endpoint,
+                                              only_hosts, deferred_sites)
+                except (ProfileError, OSError, subprocess.SubprocessError):
+                    if not has_connected:
+                        raise
+                    retry_delay = min(max(retry_delay * 2, 5), 30)
+                    say("reconnecting", "Восстанавливаем соединение с VPN…")
+                else:
+                    has_connected = True
+                    retry_delay = 0
+                time.sleep(retry_delay)
         except StopRequested:
             if protection_blocked():
                 release_protection()
@@ -583,17 +654,20 @@ def start_ssh(profile, stack):
     return endpoint, port, proxy, bridge, upstream_ip
 
 
-def start_cloudflare(profile, stack):
+def start_cloudflare(profile, stack, previous_endpoint=None):
     hostname = profile["cloudflareHost"].lower()
     cache = Path.home() / "Library/Application Support/VLESS VPN" / f"cloudflare-edge-{hostname}"
     try:
         preferred = [str(ipaddress.IPv4Address(cache.read_text().strip()))]
     except (OSError, ValueError):
         preferred = []
-    try:
-        addresses = preferred + socket.gethostbyname_ex(hostname)[2]
-    except OSError:
-        addresses = preferred
+    if previous_endpoint is not None:
+        addresses = [str(previous_endpoint)]
+    else:
+        try:
+            addresses = preferred + socket.gethostbyname_ex(hostname)[2]
+        except OSError:
+            addresses = preferred
     if not addresses:
         raise ProfileError("Не удалось получить IPv4 входа Cloudflare. Проверьте DNS и подключение к интернету.")
     attempted = []
@@ -622,8 +696,25 @@ def start_cloudflare(profile, stack):
     raise ProfileError(f"Не прошла проверка HTTPS через Cloudflare ({', '.join(attempted)}).")
 
 
-def run_connection(profile, protect, direct_sites, direct_ru):
-    app_pid = os.getppid()
+def monitor_connection(service, proxy, bridge, app_pid, upstream_ip, probe_port=None):
+    global wake_requested
+    next_check = time.monotonic() + HEALTH_CHECK_INTERVAL
+    failures = 0
+    while os.getppid() == app_pid and proxy.poll() is None and tunnel_exists():
+        if wake_requested or (bridge is not None and bridge.poll() is not None):
+            break
+        if select.select([service], [], [], 1)[0]:
+            break
+        if time.monotonic() >= next_check:
+            failures = 0 if probe(probe_port) == upstream_ip else failures + 1
+            if failures >= 2:
+                break
+            next_check = time.monotonic() + (2 if failures else HEALTH_CHECK_INTERVAL)
+    wake_requested = False
+
+
+def run_connection(profile, protect, direct_sites, direct_ru, app_pid, previous_endpoint=None,
+                   vpn_sites=(), deferred_sites=""):
     if tunnel_exists():
         raise ProfileError("Этот системный туннель уже запущен. Отключите его в приложении перед новым подключением.")
     cloudflare_host = profile.get("cloudflareHost")
@@ -631,12 +722,12 @@ def run_connection(profile, protect, direct_sites, direct_ru):
     server_port = (profile.get("sshPort") or 22) if ssh_user else (443 if cloudflare_host else profile["port"])
     with ExitStack() as stack:
         if cloudflare_host:
-            endpoint, port, proxy, bridge, upstream_ip = start_cloudflare(profile, stack)
+            endpoint, port, proxy, bridge, upstream_ip = start_cloudflare(profile, stack, previous_endpoint)
         elif ssh_user:
             endpoint, port, proxy, bridge, upstream_ip = start_ssh(profile, stack)
         else:
             try:
-                with socket.create_connection((profile["host"], server_port), timeout=6) as server:
+                with socket.create_connection((str(previous_endpoint or profile["host"]), server_port), timeout=6) as server:
                     endpoint = ipaddress.ip_address(server.getpeername()[0].split("%")[0])
             except OSError as error:
                 raise ProfileError("Сервер профиля недоступен. Проверьте адрес и подключение к интернету.") from error
@@ -644,10 +735,12 @@ def run_connection(profile, protect, direct_sites, direct_ru):
             upstream_ip = probe(port)
             if upstream_ip is None:
                 raise ProfileError("Xray не смог передать HTTPS через этот профиль. Проверьте параметры Reality и доступ к серверу.")
+        if deferred_sites and not direct_sites:
+            direct_sites.extend(resolve_direct_sites(deferred_sites, port))
         say("progress", "Запускаем системный туннель…")
         try:
             with start_tunnel(endpoint, port, server_port, protect, direct_sites, direct_ru,
-                              cloudflare=bool(cloudflare_host)) as service:
+                              cloudflare=bool(cloudflare_host), vpn_sites=vpn_sites) as service:
                 for _ in range(40):
                     if tunnel_exists():
                         break
@@ -657,23 +750,21 @@ def run_connection(profile, protect, direct_sites, direct_ru):
                     raise ProfileError("macOS не подняла сетевой интерфейс VPN.")
                 say("progress", "Проверяем выход в интернет через VPN…")
                 for _ in range(2):
-                    if probe() == upstream_ip:
+                    if probe(port if vpn_sites else None) == upstream_ip:
                         break
                 else:
                     raise ProfileError("Системный маршрут не совпал с выходом через VPS. Отключите другие VPN и повторите.")
                 say("connected", str(upstream_ip), entryIP=str(endpoint))
-                while os.getppid() == app_pid and proxy.poll() is None and tunnel_exists():
-                    if bridge is not None and bridge.poll() is not None:
-                        raise ProfileError("Соединение SSH остановилось." if ssh_user else "Локальный мост Cloudflare остановился.")
-                    if select.select([service], [], [], 1)[0]:
-                        break
-                raise ProfileError("Системный туннель остановился.")
+                monitor_connection(service, proxy, bridge, app_pid, upstream_ip, port if vpn_sites else None)
+                if os.getppid() == app_pid:
+                    say("reconnecting", "Восстанавливаем соединение с VPN…")
         finally:
             stop_proxy(proxy)
             for _ in range(40):
                 if not tunnel_exists():
                     break
                 time.sleep(0.15)
+    return endpoint
 
 
 def self_test():
@@ -701,9 +792,16 @@ def interrupted(_signal, _frame):
     raise StopRequested
 
 
+def request_reconnect(_signal, _frame):
+    global wake_requested
+    wake_requested = True
+
+
 if __name__ == "__main__":
     os.umask(0o077)
+    signal.signal(signal.SIGINT, signal.default_int_handler)
     signal.signal(signal.SIGTERM, interrupted)
+    signal.signal(signal.SIGUSR1, request_reconnect)
     try:
         mode = sys.argv[1]
         if mode == "import":
@@ -712,7 +810,8 @@ if __name__ == "__main__":
             request = json.loads(sys.stdin.read())
             connect(validate(request.get("profile", request)), allow_install=mode == "connect",
                     protect="--no-kill-switch" not in sys.argv[2:], direct_sites=request.get("directSites", ""),
-                    direct_ru=request.get("directRuSites") is True)
+                    direct_ru=request.get("directRuSites") is True, previous_entry_ip=request.get("previousEntryIP"),
+                    vpn_sites=request.get("vpnSites"))
         elif mode == "terminal-status":
             if terminal_session() is not None:
                 print("active")

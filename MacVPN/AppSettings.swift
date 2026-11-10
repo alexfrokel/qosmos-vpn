@@ -7,6 +7,14 @@ enum AppLanguage: String, CaseIterable {
     case english = "en"
 }
 
+enum SplitMode: String, CaseIterable {
+    case bypass, only
+
+    var title: String {
+        self == .only ? "Выбранные сайты через VPN" : "Выбранные сайты без VPN"
+    }
+}
+
 enum AppBuild {
     static let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0"
     static let updateSource = Bundle.main.object(forInfoDictionaryKey: "QosmosUpdateSource") as? String ?? ""
@@ -23,6 +31,8 @@ final class AppPreferences: ObservableObject {
     @Published var autoConnect: Bool { didSet { defaults.set(autoConnect, forKey: "autoConnect") } }
     @Published var killSwitch: Bool { didSet { defaults.set(killSwitch, forKey: "killSwitch") } }
     @Published var directSites: String { didSet { defaults.set(directSites, forKey: "directSites") } }
+    @Published var vpnSites: String { didSet { defaults.set(vpnSites, forKey: "vpnSites") } }
+    @Published var splitMode: SplitMode { didSet { defaults.set(splitMode.rawValue, forKey: "splitMode") } }
     @Published var directRuSites: Bool { didSet { defaults.set(directRuSites, forKey: "directRuSites") } }
     @Published var launchMinimized: Bool { didSet { defaults.set(launchMinimized, forKey: "launchMinimized") } }
     @Published var autoUpdates: Bool { didSet { defaults.set(autoUpdates, forKey: "autoUpdates") } }
@@ -47,7 +57,8 @@ final class AppPreferences: ObservableObject {
     @Published private(set) var loginStatus: SMAppService.Status = .notRegistered
     @Published private(set) var checkingUpdate = false
     @Published private(set) var updateMessage: String?
-    @Published private(set) var availableUpdate: URL?
+    @Published private(set) var availableUpdate: Release?
+    @Published private(set) var installingUpdate = false
 
     init(defaults: UserDefaults = .standard, directory: URL? = nil) {
         self.defaults = defaults
@@ -56,6 +67,8 @@ final class AppPreferences: ObservableObject {
         autoConnect = defaults.bool(forKey: "autoConnect")
         killSwitch = defaults.object(forKey: "killSwitch") as? Bool ?? true
         directSites = defaults.string(forKey: "directSites") ?? AppBuild.directSites
+        vpnSites = defaults.string(forKey: "vpnSites") ?? ""
+        splitMode = SplitMode(rawValue: defaults.string(forKey: "splitMode") ?? "") ?? .bypass
         directRuSites = defaults.bool(forKey: "directRuSites")
         launchMinimized = defaults.bool(forKey: "launchMinimized")
         autoUpdates = defaults.object(forKey: "autoUpdates") as? Bool ?? true
@@ -130,6 +143,8 @@ final class AppPreferences: ObservableObject {
         autoConnect = false
         killSwitch = true
         directSites = AppBuild.directSites
+        vpnSites = ""
+        splitMode = .bypass
         directRuSites = false
         launchMinimized = false
         autoUpdates = true
@@ -138,9 +153,17 @@ final class AppPreferences: ObservableObject {
         logging = false
     }
 
-    private struct Release: Decodable {
+    struct Release: Decodable {
         let version: String
         let url: String
+        let sha256: String?
+
+        var checksum: String? {
+            guard let sha256, sha256.range(of: #"^[0-9a-fA-F]{64}$"#, options: .regularExpression) != nil else {
+                return nil
+            }
+            return sha256.lowercased()
+        }
     }
 
     private static func httpsURL(_ string: String) -> URL? {
@@ -151,7 +174,7 @@ final class AppPreferences: ObservableObject {
     }
 
     func checkForUpdates() {
-        guard let url = Self.httpsURL(updateSource), !checkingUpdate else { return }
+        guard let url = Self.httpsURL(updateSource), !checkingUpdate, !installingUpdate else { return }
         checkingUpdate = true
         updateMessage = nil
         availableUpdate = nil
@@ -168,14 +191,15 @@ final class AppPreferences: ObservableObject {
                 self.checkingUpdate = false
                 self.updateTask = nil
                 self.updateID = nil
-                guard validResponse, let release, let download = Self.httpsURL(release.url),
+                guard validResponse, let release, Self.httpsURL(release.url) != nil,
                       release.version.range(of: #"^\d+(\.\d+){0,3}$"#, options: .regularExpression) != nil else {
                     self.updateMessage = "Не удалось проверить обновления."
                     return
                 }
                 if release.version.compare(current, options: .numeric) == .orderedDescending {
-                    self.availableUpdate = download
-                    self.updateMessage = "Доступна новая версия."
+                    self.availableUpdate = release
+                    self.updateMessage = release.checksum == nil
+                        ? "Для этой версии недоступна установка из приложения." : "Доступна новая версия."
                 } else {
                     self.updateMessage = "У вас актуальная версия."
                 }
@@ -184,18 +208,110 @@ final class AppPreferences: ObservableObject {
         updateTask = task
         task.resume()
     }
+
+    func installUpdate(restart: @escaping (URL) throws -> Void) {
+        guard !installingUpdate, let release = availableUpdate, let checksum = release.checksum,
+              let url = Self.httpsURL(release.url) else { return }
+        let target = Bundle.main.bundleURL.resolvingSymlinksInPath()
+        let parent = target.deletingLastPathComponent()
+        guard FileManager.default.isWritableFile(atPath: parent.path) else {
+            updateMessage = "Переместите Qosmos VPN в папку, доступную для записи."
+            return
+        }
+        installingUpdate = true
+        updateMessage = "Загружаем обновление…"
+        var request = URLRequest(url: url, timeoutInterval: 60)
+        request.cachePolicy = .reloadIgnoringLocalCacheData
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.timeoutIntervalForResource = 900
+        let session = URLSession(configuration: configuration)
+        session.downloadTask(with: request) { [weak self] file, response, _ in
+            let staging = parent.appendingPathComponent(".qosmos-update-\(UUID().uuidString)", isDirectory: true)
+            do {
+                guard let file, let response = response as? HTTPURLResponse,
+                      response.statusCode == 200, response.url?.scheme == "https" else {
+                    throw AppError(message: "Не удалось загрузить обновление.")
+                }
+                let manager = FileManager.default
+                try manager.createDirectory(at: staging, withIntermediateDirectories: false,
+                                            attributes: [.posixPermissions: 0o700])
+                try manager.moveItem(at: file, to: staging.appendingPathComponent("update.zip"))
+                guard let script = Bundle.main.url(forResource: "update_installer", withExtension: "py") else {
+                    throw AppError(message: "Не удалось подготовить обновление.")
+                }
+                try manager.copyItem(at: script, to: staging.appendingPathComponent("update_installer.py"))
+                DispatchQueue.main.async { self?.updateMessage = "Проверяем обновление…" }
+                let installer = Self.installer(staging, ["prepare", target.path, release.version, checksum])
+                try installer.run()
+                installer.waitUntilExit()
+                guard installer.terminationStatus == 0 else {
+                    throw AppError(message: "Проверка обновления не пройдена.")
+                }
+                DispatchQueue.main.async {
+                    do {
+                        try restart(staging)
+                        self?.updateMessage = "Устанавливаем обновление…"
+                    } catch {
+                        try? FileManager.default.removeItem(at: staging)
+                        self?.finishUpdate(error)
+                    }
+                }
+            } catch {
+                try? FileManager.default.removeItem(at: staging)
+                DispatchQueue.main.async { self?.finishUpdate(error) }
+            }
+        }.resume()
+        session.finishTasksAndInvalidate()
+    }
+
+    private func finishUpdate(_ error: Error) {
+        installingUpdate = false
+        updateMessage = (error as? AppError)?.message ?? "Не удалось подготовить обновление."
+    }
+
+    static func installer(_ staging: URL, _ arguments: [String]) -> Process {
+        let process = Process()
+        let bundled = Bundle.main.resourceURL?.appendingPathComponent("python/bin/python3")
+        process.executableURL = bundled.flatMap { FileManager.default.isExecutableFile(atPath: $0.path) ? $0 : nil }
+            ?? URL(fileURLWithPath: "/usr/bin/python3")
+        process.arguments = ["-I", "-B", staging.appendingPathComponent("update_installer.py").path] + arguments
+        process.standardInput = FileHandle.nullDevice
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+        return process
+    }
 }
 
 struct QosmosSettingsView: View {
+    private enum Section: String, CaseIterable {
+        case application = "Приложение"
+        case split = "Раздельное туннелирование"
+        case security = "Kill Switch"
+        case updates = "Обновления"
+        case diagnostics = "Диагностика и сброс"
+
+        var icon: String {
+            switch self {
+            case .application: return "gearshape"
+            case .split: return "arrow.triangle.branch"
+            case .security: return "shield"
+            case .updates: return "arrow.down.circle"
+            case .diagnostics: return "doc.text"
+            }
+        }
+    }
+
     @ObservedObject var model: VPNModel
     @ObservedObject var preferences: AppPreferences
     @State private var confirmReset = false
+    @State private var section: Section?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 11) {
             HStack(spacing: 12) {
                 Button {
-                    model.showSettings = false
+                    if section == nil { model.showSettings = false }
+                    else { section = nil }
                 } label: {
                     Image(systemName: "chevron.left")
                         .font(.system(size: 14, weight: .semibold))
@@ -203,95 +319,30 @@ struct QosmosSettingsView: View {
                 }
                 .buttonStyle(.borderless)
                 .accessibilityLabel(preferences.text("Назад"))
-                Text(preferences.text("Настройки")).font(.system(size: 23, weight: .semibold, design: .rounded))
+                Text(preferences.text(section?.rawValue ?? "Настройки"))
+                    .font(.system(size: 23, weight: .semibold, design: .rounded))
             }
 
             ScrollView {
                 VStack(spacing: 0) {
-                    row("Автозапуск", "Запускать приложение при входе в macOS") {
-                        Toggle(preferences.text("Автозапуск"), isOn: Binding(
-                            get: { preferences.loginRegistered },
-                            set: { value in
-                                do { try preferences.setLaunchAtLogin(value) }
-                                catch { model.errorMessage = "Не удалось изменить автозапуск в macOS." }
+                    if let section {
+                        sectionContent(section)
+                    } else {
+                        ForEach(Section.allCases, id: \.self) { entry in
+                            Button { section = entry } label: {
+                                HStack(spacing: 12) {
+                                    Image(systemName: entry.icon).frame(width: 24)
+                                    Text(preferences.text(entry.rawValue)).font(.system(size: 14, weight: .medium))
+                                    Spacer()
+                                    Image(systemName: "chevron.right").font(.system(size: 11, weight: .semibold))
+                                }
+                                .padding(.vertical, 14)
+                                .contentShape(Rectangle())
                             }
-                        )).labelsHidden().toggleStyle(.switch)
-                    }
-                    if preferences.loginStatus == .requiresApproval {
-                        Button(preferences.text("Разрешить в настройках macOS")) {
-                            SMAppService.openSystemSettingsLoginItems()
+                            .buttonStyle(.borderless)
+                            Divider()
                         }
-                        .padding(.bottom, 9)
                     }
-                    Divider()
-                    row("Автоподключение", "Подключать выбранный профиль при запуске после установки службы VPN.") {
-                        Toggle(preferences.text("Автоподключение"), isOn: $preferences.autoConnect)
-                            .labelsHidden().toggleStyle(.switch)
-                    }
-                    Divider()
-                    row("Kill Switch", "Блокировать интернет при обрыве VPN. Изменение применяется при следующем подключении.") {
-                        Toggle("Kill Switch", isOn: $preferences.killSwitch)
-                            .labelsHidden().toggleStyle(.switch)
-                    }
-                    Divider()
-                    VStack(alignment: .leading, spacing: 6) {
-                        Text(preferences.text("Сайты напрямую")).font(.system(size: 14, weight: .medium))
-                        TextField("aeza.ru, my.aeza.ru", text: $preferences.directSites)
-                            .textFieldStyle(.roundedBorder)
-                            .accessibilityLabel(preferences.text("Сайты напрямую"))
-                        Text(preferences.text("Введите до 8 доменов через запятую. Добавляйте поддомены отдельно. Применяется после переподключения."))
-                            .font(.system(size: 12)).foregroundStyle(.secondary)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
-                    .padding(.vertical, 11)
-                    Divider()
-                    row("Сайты .ru напрямую", "Открывать сайты .ru и их поддомены через обычное подключение. Применяется после переподключения.") {
-                        Toggle(preferences.text("Сайты .ru напрямую"), isOn: $preferences.directRuSites)
-                            .labelsHidden().toggleStyle(.switch)
-                    }
-                    Divider()
-                    row("Запускать свёрнутым", "При автозапуске оставлять значок в строке меню") {
-                        Toggle(preferences.text("Запускать свёрнутым"), isOn: $preferences.launchMinimized)
-                            .labelsHidden().toggleStyle(.switch).disabled(!preferences.loginRegistered)
-                    }
-                    Divider()
-                    updates
-                    Divider()
-                    row("Язык", "Язык интерфейса Qosmos VPN") {
-                        Picker(preferences.text("Язык"), selection: $preferences.language) {
-                            Text(verbatim: "Русский").tag(AppLanguage.russian)
-                            Text(verbatim: "English").tag(AppLanguage.english)
-                        }
-                        .labelsHidden()
-                        .fixedSize()
-                    }
-                    Divider()
-                    row("Логирование", "Сохранять события подключения в локальный журнал") {
-                        Toggle(preferences.text("Логирование"), isOn: $preferences.logging)
-                            .labelsHidden().toggleStyle(.switch)
-                    }
-                    if preferences.logging || FileManager.default.fileExists(atPath: preferences.logURL.path) {
-                        Button(preferences.text("Открыть журнал")) {
-                            do { try preferences.openLog() }
-                            catch { model.errorMessage = "Не удалось открыть журнал." }
-                        }
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(.bottom, 10)
-                    }
-                    Divider()
-                    Button(role: .destructive) { confirmReset = true } label: {
-                        HStack {
-                            Text(preferences.text("Сбросить настройки и удалить профили"))
-                            Spacer()
-                            Image(systemName: "chevron.right")
-                        }
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .contentShape(Rectangle())
-                        .padding(.vertical, 13)
-                    }
-                    .buttonStyle(.borderless)
-                    .foregroundStyle(.red)
-                    .disabled(!model.isIdle || model.importBusy)
                 }
                 .padding(.trailing, 3)
             }
@@ -310,6 +361,113 @@ struct QosmosSettingsView: View {
         }
     }
 
+    @ViewBuilder
+    private func sectionContent(_ section: Section) -> some View {
+        switch section {
+        case .application:
+            row("Автозапуск", "Запускать приложение при входе в macOS") {
+                Toggle(preferences.text("Автозапуск"), isOn: Binding(
+                    get: { preferences.loginRegistered },
+                    set: { value in
+                        do { try preferences.setLaunchAtLogin(value) }
+                        catch { model.errorMessage = "Не удалось изменить автозапуск в macOS." }
+                    }
+                )).labelsHidden().toggleStyle(.switch)
+            }
+            if preferences.loginStatus == .requiresApproval {
+                Button(preferences.text("Разрешить в настройках macOS")) {
+                    SMAppService.openSystemSettingsLoginItems()
+                }
+                .padding(.bottom, 9)
+            }
+            Divider()
+            row("Автоподключение", "Подключать выбранный профиль при запуске после установки службы VPN.") {
+                Toggle(preferences.text("Автоподключение"), isOn: $preferences.autoConnect)
+                    .labelsHidden().toggleStyle(.switch)
+            }
+            Divider()
+            row("Запускать свёрнутым", "При автозапуске оставлять значок в строке меню") {
+                Toggle(preferences.text("Запускать свёрнутым"), isOn: $preferences.launchMinimized)
+                    .labelsHidden().toggleStyle(.switch).disabled(!preferences.loginRegistered)
+            }
+            Divider()
+            row("Язык", "Язык интерфейса Qosmos VPN") {
+                Picker(preferences.text("Язык"), selection: $preferences.language) {
+                    Text(verbatim: "Русский").tag(AppLanguage.russian)
+                    Text(verbatim: "English").tag(AppLanguage.english)
+                }
+                .labelsHidden().fixedSize()
+            }
+        case .split:
+            splitSettings
+        case .security:
+            row("Kill Switch", "Блокировать интернет при обрыве VPN. Изменение применяется при следующем подключении.") {
+                Toggle("Kill Switch", isOn: $preferences.killSwitch)
+                    .labelsHidden().toggleStyle(.switch)
+            }
+        case .updates:
+            updates
+        case .diagnostics:
+            row("Логирование", "Сохранять события подключения в локальный журнал") {
+                Toggle(preferences.text("Логирование"), isOn: $preferences.logging)
+                    .labelsHidden().toggleStyle(.switch)
+            }
+            if preferences.logging || FileManager.default.fileExists(atPath: preferences.logURL.path) {
+                Button(preferences.text("Открыть журнал")) {
+                    do { try preferences.openLog() }
+                    catch { model.errorMessage = "Не удалось открыть журнал." }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.bottom, 10)
+            }
+            Divider()
+            Button(role: .destructive) { confirmReset = true } label: {
+                HStack {
+                    Text(preferences.text("Сбросить настройки и удалить профили"))
+                    Spacer()
+                    Image(systemName: "chevron.right")
+                }
+                .padding(.vertical, 13)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.borderless)
+            .foregroundStyle(.red)
+            .disabled(!model.isIdle || model.importBusy || preferences.installingUpdate)
+        }
+    }
+
+    private var splitSettings: some View {
+        let only = preferences.splitMode == .only
+        return VStack(alignment: .leading, spacing: 12) {
+            Picker(preferences.text("Режим"), selection: $preferences.splitMode) {
+                ForEach(SplitMode.allCases, id: \.self) { mode in
+                    Text(preferences.text(mode.title)).tag(mode)
+                }
+            }
+            .pickerStyle(.radioGroup)
+            .labelsHidden()
+            Text(preferences.text(only
+                ? "Выбранные домены и их поддомены идут через VPN. Остальные сайты открываются напрямую."
+                : "Выбранные домены открываются напрямую. Остальные сайты идут через VPN."))
+                .font(.system(size: 12)).foregroundStyle(.secondary)
+            TextField(preferences.text("Домены сайтов"), text: only ? $preferences.vpnSites : $preferences.directSites,
+                      prompt: Text(only ? "youtube.com, github.com" : "aeza.ru, my.aeza.ru"))
+                .textFieldStyle(.roundedBorder)
+            Text(preferences.text(only
+                ? "Укажите до 8 доменов через запятую. Применяется при следующем подключении."
+                : "Введите до 8 доменов через запятую. Добавляйте поддомены отдельно. Применяется после переподключения."))
+                .font(.system(size: 12)).foregroundStyle(.secondary)
+            if !only {
+                Divider()
+                row("Сайты .ru напрямую", "Открывать сайты .ru и их поддомены через обычное подключение. Применяется после переподключения.") {
+                    Toggle(preferences.text("Сайты .ru напрямую"), isOn: $preferences.directRuSites)
+                        .labelsHidden().toggleStyle(.switch)
+                }
+            }
+        }
+        .padding(.vertical, 11)
+    }
+
     private var updates: some View {
         VStack(alignment: .leading, spacing: 7) {
             row("Проверять обновления автоматически", "Проверять новую версию при запуске") {
@@ -318,6 +476,7 @@ struct QosmosSettingsView: View {
             }
             TextField(preferences.text("HTTPS-адрес файла обновлений"), text: $preferences.updateSource)
                 .textFieldStyle(.roundedBorder)
+                .disabled(preferences.installingUpdate)
             if !preferences.hasUpdateSource {
                 Text(preferences.text("Укажите HTTPS-адрес источника обновлений."))
                     .font(.caption).foregroundStyle(.secondary)
@@ -326,16 +485,23 @@ struct QosmosSettingsView: View {
                 Button(preferences.text(preferences.checkingUpdate ? "Проверяем…" : "Проверить сейчас")) {
                     preferences.checkForUpdates()
                 }
-                .disabled(!preferences.hasUpdateSource || preferences.checkingUpdate)
-                if let message = preferences.updateMessage {
-                    Text(preferences.text(message)).font(.caption).foregroundStyle(.secondary)
-                }
-                if let url = preferences.availableUpdate {
-                    Link(preferences.text("Скачать"), destination: url)
+                .disabled(!preferences.hasUpdateSource || preferences.checkingUpdate || preferences.installingUpdate)
+                if let release = preferences.availableUpdate {
+                    if release.checksum != nil {
+                        Button("\(preferences.text("Обновить")) · \(release.version)") {
+                            preferences.installUpdate(restart: model.restartForUpdate)
+                        }
+                        .disabled(preferences.installingUpdate)
+                    } else if let url = URL(string: release.url) {
+                        Link(preferences.text("Скачать"), destination: url)
+                    }
                 }
             }
-            .padding(.bottom, 12)
+            if let message = preferences.updateMessage {
+                Text(preferences.text(message)).font(.caption).foregroundStyle(.secondary)
+            }
         }
+        .padding(.bottom, 12)
     }
 
     private func row<T: View>(_ title: String, _ subtitle: String, @ViewBuilder control: () -> T) -> some View {

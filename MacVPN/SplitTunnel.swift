@@ -13,6 +13,7 @@ struct SplitTunnel {
     private let cloudflareEdge: String?
     let interface: String
     let directRuSites: Bool
+    let vpnSites: [String]
 
     static let nonPublicIPv4 = [
         "0.0.0.0/8", "10.0.0.0/8", "100.64.0.0/10", "127.0.0.0/8",
@@ -23,10 +24,12 @@ struct SplitTunnel {
 
     var addresses: [String] { Array(Set(sites.flatMap(\.addresses))).sorted() }
 
-    init(sites: [DirectSite], directRuSites: Bool, cloudflareEdge: String? = nil) throws {
-        guard (directRuSites || !sites.isEmpty || cloudflareEdge != nil),
+    init(sites: [DirectSite], directRuSites: Bool, cloudflareEdge: String? = nil, vpnSites: [String] = []) throws {
+        guard (directRuSites || !sites.isEmpty || cloudflareEdge != nil || !vpnSites.isEmpty),
               cloudflareEdge.map(Self.publicIPv4) ?? true,
               sites.count <= 8, Set(sites.map(\.host)).count == sites.count,
+              vpnSites.count <= 8, Set(vpnSites).count == vpnSites.count,
+              vpnSites.allSatisfy(Self.validHost),
               sites.allSatisfy(Self.valid) else { throw SplitError.invalidSites }
         let key = "State:/Network/Global/IPv4" as CFString
         guard let state = SCDynamicStoreCopyValue(nil, key) as? [String: Any],
@@ -36,16 +39,20 @@ struct SplitTunnel {
               if_nametoindex(name) != 0 else { throw SplitError.noPhysicalInterface }
         self.sites = sites
         self.directRuSites = directRuSites
+        self.vpnSites = vpnSites
         self.cloudflareEdge = cloudflareEdge
         gateway = router
         interface = name
     }
 
     private static func valid(_ site: DirectSite) -> Bool {
-        let labels = site.host.split(separator: ".", omittingEmptySubsequences: false)
-        return site.host.utf8.count <= 253 && labels.count >= 2
+        validHost(site.host) && !site.addresses.isEmpty && site.addresses.count <= 8 && site.addresses.allSatisfy(publicIPv4)
+    }
+
+    private static func validHost(_ host: String) -> Bool {
+        let labels = host.split(separator: ".", omittingEmptySubsequences: false)
+        return host.utf8.count <= 253 && labels.count >= 2
             && labels.allSatisfy { $0.range(of: #"^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$"#, options: .regularExpression) != nil }
-            && !site.addresses.isEmpty && site.addresses.count <= 8 && site.addresses.allSatisfy(publicIPv4)
     }
 
     private static func ipv4(_ value: String) -> UInt32? {
@@ -67,7 +74,7 @@ struct SplitTunnel {
     func installRoutes(tunnel: String, endpoint: String) throws -> [String] {
         var added: [String] = []
         do {
-            if directRuSites {
+            if directRuSites || !vpnSites.isEmpty {
                 let scopedDefault = try? Self.route(["get", "-ifscope", interface, "default"])
                 if routeField("flags", in: scopedDefault)?.contains("IFSCOPE") != true {
                     _ = try Self.route(["add", "-net", "-ifscope", interface, "default", gateway])
@@ -135,7 +142,50 @@ struct SplitTunnel {
         return String(decoding: data, as: UTF8.self)
     }
 
-    func configure(_ config: inout [String: Any]) throws {
+    static func configureVPNOnly(_ config: inout [String: Any], sites: [String], interface: String, cachePath: String) throws {
+        guard var outbounds = config["outbounds"] as? [[String: Any]],
+              var route = config["route"] as? [String: Any],
+              let defaultRules = route["rules"] as? [[String: Any]],
+              var dns = config["dns"] as? [String: Any],
+              var servers = dns["servers"] as? [[String: Any]],
+              var directDNS = servers.first else { throw SplitError.invalidTemplate }
+        outbounds.append([
+            "type": "direct", "tag": "qosmos-direct", "bind_interface": interface,
+            "domain_resolver": ["server": "qosmos-direct-dns", "strategy": "ipv4_only"]
+        ])
+        config["outbounds"] = outbounds
+        // Only connections with a domain supplied by our FakeIP resolver may go direct.
+        // A cached literal IP or a browser DNS bypass cannot fall through to direct.
+        let suffixes = sites.map { "." + $0 }
+        route["rules"] = defaultRules + [
+            ["domain": sites, "domain_suffix": suffixes, "action": "route", "outbound": "vps"],
+            ["domain_regex": [".+"], "network": "tcp", "port": [80, 443],
+             "action": "route", "outbound": "qosmos-direct"],
+            ["action": "reject", "no_drop": true]
+        ]
+        config["route"] = route
+        directDNS["tag"] = "qosmos-direct-dns"
+        directDNS["detour"] = "qosmos-direct"
+        servers += [directDNS, ["type": "fakeip", "tag": "qosmos-fakeip", "inet4_range": "198.18.128.0/17"]]
+        dns["servers"] = servers
+        dns["rules"] = [
+            ["query_type": ["AAAA", "HTTPS", "SVCB"], "action": "predefined", "rcode": "NOERROR"],
+            ["query_type": ["A"], "action": "route", "server": "qosmos-fakeip"],
+            ["domain": sites, "domain_suffix": suffixes, "action": "route", "server": "cloudflare"]
+        ]
+        dns["final"] = "qosmos-direct-dns"
+        config["dns"] = dns
+        var experimental = config["experimental"] as? [String: Any] ?? [:]
+        experimental["cache_file"] = ["enabled": true, "path": cachePath, "store_fakeip": true]
+        config["experimental"] = experimental
+    }
+
+    func configure(_ config: inout [String: Any], uid: uid_t) throws {
+        if !vpnSites.isEmpty {
+            try Self.configureVPNOnly(&config, sites: vpnSites, interface: interface,
+                                      cachePath: "/private/var/run/qosmos-fakeip-\(uid).db")
+            return
+        }
         guard !sites.isEmpty || directRuSites else { return }
         guard var outbounds = config["outbounds"] as? [[String: Any]],
               var route = config["route"] as? [String: Any],
