@@ -1,0 +1,10 @@
+--- a/experimental/libbox/command_server.go
++++ b/experimental/libbox/command_server.go
+@@ -195,7 +195,6 @@
+ }
+ 
+ func (s *CommandServer) StartOrReloadService(configContent string, options *OverrideOptions) error {
+-	saveConfigSnapshot(configContent)
+ 	if s.powerManager.Recorder() != nil {
+ 		copyConfigSnapshot(filepath.Join(sWorkingPath, powerreport.DraftDirectoryName))
+ 	}

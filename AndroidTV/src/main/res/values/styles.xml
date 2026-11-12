@@ -1,0 +1,8 @@
+<resources>
+    <style name="QosmosTheme" parent="android:style/Theme.Material.NoActionBar">
+        <item name="android:fontFamily">sans</item>
+        <item name="android:windowBackground">#0E0F12</item>
+        <item name="android:colorAccent">#FFA96B</item>
+        <item name="android:windowActionModeOverlay">true</item>
+    </style>
+</resources>
