@@ -89,6 +89,7 @@ final class VPNModel: ObservableObject {
     private var activeRequest: ConnectionRequest?
     private var ipCheckID: UUID?
     private var quitCompletion: (() -> Void)?
+    private var disconnectKeepsProtection = false
     private var updateShutdownTimeout: DispatchWorkItem?
     private let storage: URL
     private let defaults: UserDefaults
@@ -474,6 +475,7 @@ final class VPNModel: ObservableObject {
             state = stoppingTerminal ? .terminalConnected : .idle
             detail = stoppingTerminal ? "Не удалось отключить VPN." : "Не удалось запустить VPN."
             errorMessage = (error as? AppError)?.message ?? detail
+            if command == "release-protection" { quitCompletion = nil }
         }
     }
 
@@ -486,19 +488,24 @@ final class VPNModel: ObservableObject {
             return
         }
         guard let backend, state != .disconnecting else { return }
-        let keepProtection = keepingProtection || state == .reconnecting
+        disconnectKeepsProtection = keepingProtection
         preferences.record("Disconnection requested")
         state = .disconnecting
         detail = "Останавливаем системный туннель…"
         if backend.isRunning {
-            if keepProtection { backend.interrupt() }
+            if keepingProtection { backend.interrupt() }
             else { backend.terminate() }
         }
     }
 
     func quit(afterDisconnect completion: @escaping () -> Void) {
         quitCompletion = completion
-        disconnect()
+        reconnectWithSettingsPending = false
+        if isIdle && internetBlocked {
+            restoreInternet()
+        } else {
+            disconnect()
+        }
     }
 
     func restartForUpdate(_ staging: URL, onFailure: @escaping (Error) -> Void) {
@@ -582,7 +589,12 @@ final class VPNModel: ObservableObject {
 
     private func finish(_ status: Int32, command: String) {
         let stoppingTerminal = command == "stop-terminal"
-        if command == "release-protection" && status == 0 { internetBlocked = false }
+        let keptProtection = disconnectKeepsProtection
+        disconnectKeepsProtection = false
+        if status == 0 && (command == "release-protection" ||
+            (state == .disconnecting && activeRequest != nil && !keptProtection)) {
+            internetBlocked = false
+        }
         if state == .disconnecting && status == 0 && command != "release-protection" { detail = "VPN отключён." }
         if status != 0 && detail.hasSuffix("…") {
             detail = "Подключение остановилось."
@@ -591,6 +603,19 @@ final class VPNModel: ObservableObject {
         activeRequest = nil
         exitIP = nil
         state = stoppingTerminal && status != 0 ? .terminalConnected : .idle
+        if quitCompletion != nil && updateShutdownTimeout == nil {
+            if status != 0 {
+                quitCompletion = nil
+                errorMessage = detail
+                refreshTerminal(refreshIP: true)
+                return
+            }
+            if keptProtection {
+                state = .disconnecting
+                startBackend("release-protection")
+                return
+            }
+        }
         let completion = quitCompletion
         quitCompletion = nil
         if let completion { completion() }
@@ -1192,7 +1217,7 @@ final class VPNDelegate: NSObject, NSApplicationDelegate {
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         if model.provisioning || model.isStoppingForUpdate { return .terminateCancel }
-        guard model.isRunning else { return .terminateNow }
+        guard model.isRunning || (model.isIdle && model.internetBlocked) else { return .terminateNow }
         model.quit(afterDisconnect: { DispatchQueue.main.async { sender.terminate(nil) } })
         return .terminateCancel
     }

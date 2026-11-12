@@ -15,6 +15,8 @@ struct SplitTunnel {
     let directRuSites: Bool
     let vpnSites: [String]
 
+    private static let russianDomainSuffixes = [".ru", ".xn--p1ai"]
+
     static let nonPublicIPv4 = [
         "0.0.0.0/8", "10.0.0.0/8", "100.64.0.0/10", "127.0.0.0/8",
         "169.254.0.0/16", "172.16.0.0/12", "192.0.0.0/24", "192.0.2.0/24",
@@ -192,7 +194,11 @@ struct SplitTunnel {
               let defaultRules = route["rules"] as? [[String: Any]],
               var dns = config["dns"] as? [String: Any] else { throw SplitError.invalidTemplate }
 
-        outbounds.append(["type": "direct", "tag": "qosmos-direct", "bind_interface": interface])
+        var directOutbound: [String: Any] = ["type": "direct", "tag": "qosmos-direct", "bind_interface": interface]
+        if directRuSites {
+            directOutbound["domain_resolver"] = ["server": "qosmos-direct-dns", "strategy": "ipv4_only"]
+        }
+        outbounds.append(directOutbound)
         config["outbounds"] = outbounds
 
         var sniff: [String: Any] = [
@@ -214,7 +220,7 @@ struct SplitTunnel {
             directRules.append([
                 "type": "logical", "mode": "and",
                 "rules": [
-                    ["domain_suffix": [".ru"], "network": "tcp", "port": [80, 443], "protocol": ["http", "tls"]],
+                    ["domain_suffix": Self.russianDomainSuffixes, "network": "tcp", "port": [80, 443], "protocol": ["http", "tls"]],
                     ["ip_cidr": ["0.0.0.0/0"]],
                     ["ip_cidr": Self.nonPublicIPv4, "invert": true]
                 ],
@@ -237,7 +243,19 @@ struct SplitTunnel {
             dnsRules.append(noAlternative.merging(["domain": sites.map(\.host)]) { _, new in new })
         }
         if directRuSites {
-            dnsRules.append(noAlternative.merging(["domain_suffix": [".ru"]]) { _, new in new })
+            guard var servers = dns["servers"] as? [[String: Any]],
+                  var directDNS = servers.first(where: { $0["tag"] as? String == "cloudflare" })
+            else { throw SplitError.invalidTemplate }
+            directDNS["tag"] = "qosmos-direct-dns"
+            directDNS.removeValue(forKey: "detour")
+            directDNS["bind_interface"] = interface
+            servers.append(directDNS)
+            dns["servers"] = servers
+            dnsRules += [
+                ["domain_suffix": Self.russianDomainSuffixes, "query_type": ["AAAA", "HTTPS", "SVCB"],
+                 "action": "predefined", "rcode": "NOERROR"],
+                ["domain_suffix": Self.russianDomainSuffixes, "action": "route", "server": "qosmos-direct-dns"]
+            ]
         }
         dns["rules"] = dnsRules + (dns["rules"] as? [[String: Any]] ?? [])
         config["dns"] = dns

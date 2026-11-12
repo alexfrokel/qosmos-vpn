@@ -24,14 +24,16 @@ RESOURCES = Path(__file__).resolve().parent
 XRAY = RESOURCES / "xray"
 SING_BOX = RESOURCES / "sing-box"
 CHECK_URL = "https://api.ipify.org/"
+FALLBACK_CHECK_URL = "https://1.1.1.1/cdn-cgi/trace"
 HEALTH_CHECK_INTERVAL = 20
+HEALTH_CHECK_FAILURE_LIMIT = 3
 wake_requested = False
 TUN_IPV4 = "198.18.10.1"
 SERVICE = Path("/Library/Application Support/QosmosVPN")
 SERVICE_SOCKET = SERVICE / "tunnel.sock"
 SERVICE_READY = SERVICE / "tunnel-dns-v3"
 SPLIT_SERVICE_READY = SERVICE / "tunnel-split-v5"
-RU_SPLIT_SERVICE_READY = SERVICE / "tunnel-split-ru-v6"
+RU_SPLIT_SERVICE_READY = SERVICE / "tunnel-split-ru-v10"
 CLOUDFLARE_SERVICE_READY = SERVICE / "tunnel-cloudflare-v7"
 VPN_SITES_SERVICE_READY = SERVICE / "tunnel-vpn-sites-v8"
 EXTENDED_SPLIT_SERVICE_READY = SERVICE / "tunnel-split-v9"
@@ -48,6 +50,10 @@ STOP_TERMINAL = """actual=$(/bin/ps -ww -p "$1" -o lstart= -o uid= -o command=) 
 
 
 class ProfileError(ValueError):
+    pass
+
+
+class HTTPSProbeError(ProfileError):
     pass
 
 
@@ -246,15 +252,20 @@ def probe(proxy_port=None):
     proxy_args = ["--noproxy", "*"] if proxy_port is None else [
         "--noproxy", "", "--proxy", f"socks5h://127.0.0.1:{proxy_port}",
     ]
-    result = subprocess.run(
-        ["/usr/bin/curl", "-4fsS", *proxy_args, "--connect-timeout", "4", "--max-time", "7", CHECK_URL],
-        capture_output=True, text=True,
-    )
-    if result.returncode == 0:
+    for url in (CHECK_URL, FALLBACK_CHECK_URL):
+        result = subprocess.run(
+            ["/usr/bin/curl", "-q", "-4fsS", *proxy_args, "--connect-timeout", "4", "--max-time", "7", url],
+            capture_output=True, text=True,
+        )
+        if result.returncode != 0:
+            continue
+        address = result.stdout.strip()
+        if url == FALLBACK_CHECK_URL:
+            address = next((line[3:] for line in address.splitlines() if line.startswith("ip=")), "")
         try:
-            return ipaddress.IPv4Address(result.stdout.strip())
+            return ipaddress.IPv4Address(address)
         except ValueError:
-            pass
+            continue
     return None
 
 
@@ -333,6 +344,8 @@ def prepare_service(allow_install, split=False, direct_ru=False, cloudflare=Fals
         required = VPN_SITES_SERVICE_READY
     if extended_split:
         required = EXTENDED_SPLIT_SERVICE_READY
+    if direct_ru:
+        required = RU_SPLIT_SERVICE_READY
     if not required.is_file():
         if not allow_install:
             raise ProfileError("Для автоподключения один раз подключитесь вручную и установите службу Qosmos VPN.")
@@ -542,58 +555,70 @@ def connect(profile, allow_install, protect, direct_sites, direct_ru=False, prev
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as error:
             raise ProfileError("VLESS VPN уже запускает или поддерживает подключение.") from error
-        if tunnel_exists():
-            raise ProfileError("Этот системный туннель уже запущен. Отключите его в приложении перед новым подключением.")
-        prepare_service(allow_install, split=bool(direct_hosts), direct_ru=direct_ru,
-                        cloudflare=bool(profile.get("cloudflareHost")), vpn_sites=bool(only_hosts),
-                        extended_split=max(len(direct_hosts), len(only_hosts)) > 8)
-        blocked = protection_blocked()
-        endpoint = None
-        if blocked and previous_entry_ip is not None:
-            try:
-                endpoint = ipaddress.ip_address(previous_entry_ip)
-            except ValueError:
-                pass
-        site_cache = storage / "direct-sites-cache.json"
-        sites = [] if only_hosts else None
-        deferred_sites = []
-        if blocked and sites is None:
-            try:
-                cached = json.loads(site_cache.read_text())
-                if cached.get("input") == direct_sites:
-                    sites = cached["sites"]
-            except (OSError, ValueError, KeyError, AttributeError):
-                pass
-        if sites is None:
-            if blocked:
-                # The firewall only permits the VPS before the TUN is ready.
-                sites, deferred_sites = [], direct_hosts
-            else:
-                sites = resolve_direct_sites(direct_hosts)
-                try:
-                    site_cache.write_text(json.dumps({"input": direct_sites, "sites": sites}))
-                except OSError:
-                    pass
-        app_pid = os.getppid()
         try:
+            if tunnel_exists():
+                raise ProfileError("Этот системный туннель уже запущен. Отключите его в приложении перед новым подключением.")
+            prepare_service(allow_install, split=bool(direct_hosts), direct_ru=direct_ru,
+                            cloudflare=bool(profile.get("cloudflareHost")), vpn_sites=bool(only_hosts),
+                            extended_split=max(len(direct_hosts), len(only_hosts)) > 8)
+            blocked = protection_blocked()
+            endpoint = None
+            if blocked and previous_entry_ip is not None:
+                try:
+                    endpoint = ipaddress.ip_address(previous_entry_ip)
+                except ValueError:
+                    pass
+            site_cache = storage / "direct-sites-cache.json"
+            sites = [] if only_hosts else None
+            deferred_sites = []
+            if blocked and sites is None:
+                try:
+                    cached = json.loads(site_cache.read_text())
+                    if cached.get("input") == direct_sites:
+                        sites = cached["sites"]
+                except (OSError, ValueError, KeyError, AttributeError):
+                    pass
+            if sites is None:
+                if blocked:
+                    # The firewall only permits the VPS before the TUN is ready.
+                    sites, deferred_sites = [], direct_hosts
+                else:
+                    sites = resolve_direct_sites(direct_hosts)
+                    try:
+                        site_cache.write_text(json.dumps({"input": direct_sites, "sites": sites}))
+                    except OSError:
+                        pass
+            app_pid = os.getppid()
             has_connected = False
+            retried_startup = False
             retry_delay = 0
             while os.getppid() == app_pid:
                 try:
                     endpoint = run_connection(profile, protect, sites, direct_ru, app_pid, endpoint,
                                               only_hosts, deferred_sites)
-                except (ProfileError, OSError, subprocess.SubprocessError):
+                except (ProfileError, OSError, subprocess.SubprocessError) as error:
                     if not has_connected:
-                        raise
-                    retry_delay = min(max(retry_delay * 2, 5), 30)
-                    say("reconnecting", "Восстанавливаем соединение с VPN…")
+                        if retried_startup or not isinstance(error, HTTPSProbeError):
+                            raise
+                        retried_startup = True
+                        retry_delay = 2
+                        say("progress", "Повторяем проверку HTTPS через VPN…")
+                    else:
+                        retry_delay = min(max(retry_delay * 2, 5), 30)
+                        say("reconnecting", "Восстанавливаем соединение с VPN…")
                 else:
                     has_connected = True
                     retry_delay = 0
                 time.sleep(retry_delay)
         except StopRequested:
-            if protection_blocked():
-                release_protection()
+            if SERVICE_READY.is_file() or PREVIOUS_SERVICE_READY.is_file():
+                try:
+                    # The service handles this after tearing down the tunnel socket.
+                    release_protection()
+                except OSError as error:
+                    raise ProfileError(
+                        "Не удалось снять Kill Switch. Нажмите «Вернуть доступ» в Qosmos."
+                    ) from error
             raise
 
 
@@ -713,7 +738,7 @@ def monitor_connection(service, proxy, bridge, app_pid, upstream_ip, probe_port=
             break
         if time.monotonic() >= next_check:
             failures = 0 if probe(probe_port) == upstream_ip else failures + 1
-            if failures >= 2:
+            if failures >= HEALTH_CHECK_FAILURE_LIMIT:
                 break
             next_check = time.monotonic() + (2 if failures else HEALTH_CHECK_INTERVAL)
     wake_requested = False
@@ -740,7 +765,7 @@ def run_connection(profile, protect, direct_sites, direct_ru, app_pid, previous_
             port, proxy, bridge = start_xray(profile, endpoint, stack)
             upstream_ip = probe(port)
             if upstream_ip is None:
-                raise ProfileError("Xray не смог передать HTTPS через этот профиль. Проверьте параметры Reality и доступ к серверу.")
+                raise HTTPSProbeError("Xray запустился, но через VPN не ответили оба проверочных HTTPS-адреса.")
         if deferred_sites and not direct_sites:
             direct_sites.extend(resolve_direct_sites(deferred_sites, port))
         say("progress", "Запускаем системный туннель…")
@@ -755,10 +780,16 @@ def run_connection(profile, protect, direct_sites, direct_ru, app_pid, previous_
                 else:
                     raise ProfileError("macOS не подняла сетевой интерфейс VPN.")
                 say("progress", "Проверяем выход в интернет через VPN…")
+                observed_ip = None
                 for _ in range(2):
-                    if probe(port if vpn_sites else None) == upstream_ip:
+                    current_ip = probe(port if vpn_sites else None)
+                    if current_ip == upstream_ip:
                         break
+                    if current_ip is not None:
+                        observed_ip = current_ip
                 else:
+                    if observed_ip is None:
+                        raise HTTPSProbeError("Туннель запустился, но через VPN не ответили оба проверочных HTTPS-адреса.")
                     raise ProfileError("Системный маршрут не совпал с выходом через VPS. Отключите другие VPN и повторите.")
                 say("connected", str(upstream_ip), entryIP=str(endpoint))
                 monitor_connection(service, proxy, bridge, app_pid, upstream_ip, port if vpn_sites else None)
@@ -790,7 +821,7 @@ def self_test():
     print("OK")
 
 
-class StopRequested(InterruptedError):
+class StopRequested(Exception):
     pass
 
 
@@ -837,7 +868,7 @@ if __name__ == "__main__":
             self_test()
         else:
             raise ProfileError("Неизвестная команда.")
-    except (InterruptedError, KeyboardInterrupt):
+    except (StopRequested, InterruptedError, KeyboardInterrupt):
         say("disconnected", "VPN отключён.")
     except ProfileError as error:
         say("error", str(error))

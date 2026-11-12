@@ -3,30 +3,59 @@ name: macOS release
 on:
   workflow_dispatch:
   push:
-    tags:
-      - 'v*'
+    branches: [main]
+    paths: [MacVPN/Info.plist]
+
+concurrency:
+  group: qosmos-macos-release
+  cancel-in-progress: false
 
 permissions:
   contents: read
 
 jobs:
-  build:
-    runs-on: macos-26
+  version:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
     outputs:
-      version: ${{ steps.version.outputs.version }}
+      version: ${{ steps.check.outputs.version }}
+      publish: ${{ steps.check.outputs.publish }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compare the app version with the latest release
+        id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          export QOSMOS_LATEST_TAG="$(gh release view --json tagName --jq .tagName)"
+          python3 - <<'PY'
+          import os, plistlib, re
+          from pathlib import Path
+
+          version = plistlib.loads(Path('MacVPN/Info.plist').read_bytes())['CFBundleShortVersionString']
+          latest = os.environ['QOSMOS_LATEST_TAG'].removeprefix('v')
+          for value in (version, latest):
+              if not re.fullmatch(r'\d+\.\d+\.\d+', value):
+                  raise SystemExit(f'Unexpected version: {value}')
+          publish = tuple(map(int, version.split('.'))) > tuple(map(int, latest.split('.')))
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              print(f'version={version}', file=output)
+              print(f'publish={str(publish).lower()}', file=output)
+          PY
+
+  build:
+    needs: version
+    if: needs.version.outputs.publish == 'true'
+    runs-on: macos-26
     steps:
       - uses: actions/checkout@v4
       - name: Check version and architecture
-        id: version
         shell: bash
+        env:
+          QOSMOS_VERSION: ${{ needs.version.outputs.version }}
         run: |
           test "$(uname -m)" = arm64
-          version=$(/usr/libexec/PlistBuddy -c 'Print CFBundleShortVersionString' MacVPN/Info.plist)
-          [[ "$version" =~ ^[0-9]+\.[0-9]+(\.[0-9]+)?$ ]]
-          if [[ "$GITHUB_REF_TYPE" == tag ]]; then
-            test "$GITHUB_REF_NAME" = "v$version"
-          fi
-          echo "version=$version" >> "$GITHUB_OUTPUT"
+          test "$(/usr/libexec/PlistBuddy -c 'Print CFBundleShortVersionString' MacVPN/Info.plist)" = "$QOSMOS_VERSION"
       - name: Fetch pinned upstream engines
         run: MacVPN/fetch-engines.sh "$RUNNER_TEMP/qosmos-engines"
       - name: Validate Kill Switch rules
@@ -41,14 +70,12 @@ jobs:
       - name: Build and archive
         shell: bash
         env:
-          QOSMOS_VERSION: ${{ steps.version.outputs.version }}
+          QOSMOS_VERSION: ${{ needs.version.outputs.version }}
         run: |
           export QOSMOS_ENGINE_DIR="$RUNNER_TEMP/qosmos-engines"
-          export QOSMOS_BUILD_DIR="$RUNNER_TEMP/qosmos-build"
           export QOSMOS_UPDATE_SOURCE="https://github.com/$GITHUB_REPOSITORY/releases/latest/download/qosmos-update.json"
-          MacVPN/build.sh
           mkdir -p dist
-          ditto -c -k --keepParent "$QOSMOS_BUILD_DIR/Qosmos VPN.app" dist/Qosmos-VPN-macOS-arm64.zip
+          bash MacVPN/build-installer.sh "$PWD/dist/Qosmos-VPN-macOS-arm64.pkg" "$PWD/dist/Qosmos-VPN-macOS-arm64.zip"
           /usr/bin/python3 - <<'PY'
           import hashlib, json, os
           from pathlib import Path
@@ -74,8 +101,7 @@ jobs:
           if-no-files-found: error
 
   publish:
-    if: github.ref_type == 'tag'
-    needs: build
+    needs: [version, build]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -87,7 +113,8 @@ jobs:
       - name: Publish release and update manifest
         env:
           GH_TOKEN: ${{ github.token }}
+          QOSMOS_VERSION: ${{ needs.version.outputs.version }}
         run: |
-          gh release create "$GITHUB_REF_NAME" dist/* \
-            --repo "$GITHUB_REPOSITORY" --verify-tag --generate-notes \
-            --title "Qosmos VPN ${{ needs.build.outputs.version }}"
+          gh release create "v$QOSMOS_VERSION" dist/* \
+            --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --generate-notes --latest \
+            --title "Qosmos VPN $QOSMOS_VERSION"
