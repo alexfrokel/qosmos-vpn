@@ -6,10 +6,12 @@ import android.content.Intent;
 import android.graphics.Color;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
+import android.net.Uri;
 import android.net.VpnService;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.provider.Settings;
 import android.text.InputType;
 import android.text.TextUtils;
 import android.view.Gravity;
@@ -32,6 +34,8 @@ import java.util.concurrent.Executors;
 
 public final class MainActivity extends Activity {
     private static final int VPN_PERMISSION = 100;
+    private static final int INSTALL_PERMISSION = 101;
+    private static final int INSTALL_UPDATE = 102;
     private static final int BACKGROUND = 0xff0e0f12;
     private static final int CARD = 0xff1c1d22;
     private static final int TEXT = 0xfff3f0ed;
@@ -51,6 +55,8 @@ public final class MainActivity extends Activity {
     private boolean sourcePage;
     private boolean settingsChild;
     private int catalogRequest;
+    private TextView updateFeedback;
+    private boolean updating;
 
     private final Runnable observeVpn = new Runnable() {
         @Override public void run() {
@@ -180,6 +186,7 @@ public final class MainActivity extends Activity {
         LinearLayout screen = settingsPage("Настройки");
         Button catalog = button("Загрузить конфиг", this::showCatalog);
         addButton(screen, catalog, 54);
+        addButton(screen, button("Обновить приложение", this::showUpdates), 54);
         addButton(screen, button("Ссылка подписки", this::showSource), 50);
         if (!store.source().isEmpty()) {
             addButton(screen, button("Обновить подписку", () -> fetch(store.source())), 50);
@@ -189,6 +196,95 @@ public final class MainActivity extends Activity {
         }
         addButton(screen, button("Назад", () -> showHome(false)), 50);
         catalog.requestFocus();
+    }
+
+    private void showUpdates() {
+        if (updating) return;
+        int request = ++catalogRequest;
+        settingsChild = true;
+        LinearLayout screen = settingsPage("Обновить приложение");
+        updateFeedback = label("Проверяем обновление…", 18, SECONDARY, false);
+        updateFeedback.setPadding(0, dp(10), 0, dp(6));
+        screen.addView(updateFeedback);
+        Button action = button("Проверить снова", this::showUpdates);
+        addButton(screen, action, 54);
+        action.setVisibility(View.GONE);
+        Button back = button("Назад", this::showSettings);
+        addButton(screen, back, 50);
+        back.requestFocus();
+
+        worker.execute(() -> {
+            TvUpdater.Update available = null;
+            String detail = "Установлена последняя версия.";
+            try {
+                available = TvUpdater.check(getApplicationContext());
+                if (available != null) detail = "Доступна версия " + available.version + ".";
+            } catch (Exception error) {
+                detail = "Не удалось проверить обновление. Проверь подключение и попробуй ещё раз.";
+            }
+            TvUpdater.Update update = available;
+            String result = detail;
+            runOnUiThread(() -> {
+                if (isDestroyed() || request != catalogRequest) return;
+                updateFeedback.setText(result);
+                if (update != null) {
+                    action.setText("Скачать и установить");
+                    action.setOnClickListener(view -> downloadUpdate(update, action, request));
+                }
+                action.setVisibility(View.VISIBLE);
+                action.requestFocus();
+            });
+        });
+    }
+
+    private void downloadUpdate(TvUpdater.Update update, Button action, int request) {
+        if (updating) return;
+        updating = true;
+        action.setEnabled(false);
+        updateFeedback.setText("Загрузка 0%");
+        worker.execute(() -> {
+            boolean ready = false;
+            try {
+                TvUpdater.download(getApplicationContext(), update, progress -> runOnUiThread(() -> {
+                    if (!isDestroyed() && request == catalogRequest) updateFeedback.setText("Загрузка " + progress + "%");
+                }));
+                ready = true;
+            } catch (Exception ignored) { }
+            boolean verified = ready;
+            runOnUiThread(() -> {
+                updating = false;
+                if (isDestroyed() || request != catalogRequest) return;
+                action.setEnabled(true);
+                if (verified) {
+                    updateFeedback.setText("Обновление скачано и проверено.");
+                    action.setText("Установить");
+                    action.setOnClickListener(view -> installUpdate());
+                    installUpdate();
+                } else {
+                    updateFeedback.setText("Загрузка или проверка обновления не прошла. Попробуй ещё раз.");
+                }
+            });
+        });
+    }
+
+    private void installUpdate() {
+        if (!new File(getCacheDir(), TvUpdater.APK).isFile()) {
+            showUpdates();
+            return;
+        }
+        try {
+            if (!getPackageManager().canRequestPackageInstalls()) {
+                updateFeedback.setText("Разреши установку приложений из Qosmos в настройках Android.");
+                startActivityForResult(new Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
+                    Uri.parse("package:" + getPackageName())), INSTALL_PERMISSION);
+                return;
+            }
+            Intent install = new Intent(Intent.ACTION_INSTALL_PACKAGE).setDataAndType(UpdateApkProvider.URI, UpdateApkProvider.MIME)
+                .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION).putExtra(Intent.EXTRA_RETURN_RESULT, true);
+            startActivityForResult(install, INSTALL_UPDATE);
+        } catch (android.content.ActivityNotFoundException | SecurityException error) {
+            updateFeedback.setText("Телевизор не открыл системный установщик.");
+        }
     }
 
     private void showCatalog() {
@@ -231,8 +327,9 @@ public final class MainActivity extends Activity {
                     return;
                 }
                 feedback.setText("Выбери профиль пультом.");
+                addButton(choices, button("Загрузить все профили", () -> saveCatalogProfiles(profiles, null)), 54);
                 for (RealityProfile profile : profiles) {
-                    Button item = button(profile.name, () -> selectCatalogProfile(profile));
+                    Button item = button(profile.name, () -> saveCatalogProfiles(java.util.Collections.singletonList(profile), profile));
                     item.setSingleLine(true);
                     item.setEllipsize(TextUtils.TruncateAt.END);
                     addButton(choices, item, 54);
@@ -242,18 +339,21 @@ public final class MainActivity extends Activity {
         });
     }
 
-    private void selectCatalogProfile(RealityProfile profile) {
+    private void saveCatalogProfiles(List<RealityProfile> imported, RealityProfile profile) {
         if (TunnelService.state() != TunnelService.State.IDLE) return;
         try {
-            store.importLocal(java.util.Collections.singletonList(profile));
-            List<RealityProfile> profiles = store.profiles();
-            for (int index = 0; index < profiles.size(); index++) {
-                if (profile.sameEndpointAndCredentials(profiles.get(index))) {
-                    store.select(index);
-                    break;
+            store.importLocal(imported);
+            if (profile != null) {
+                List<RealityProfile> profiles = store.profiles();
+                for (int index = 0; index < profiles.size(); index++) {
+                    if (profile.sameEndpointAndCredentials(profiles.get(index))) {
+                        store.select(index);
+                        break;
+                    }
                 }
             }
-            notice = "Профиль «" + profile.name + "» готов к подключению.";
+            notice = profile == null ? "Профилей в каталоге: " + imported.size() + "."
+                : "Профиль «" + profile.name + "» готов к подключению.";
         } catch (IOException e) {
             notice = "Не удалось сохранить профиль.";
         }
@@ -372,6 +472,14 @@ public final class MainActivity extends Activity {
 
     @Override protected void onActivityResult(int request, int result, Intent data) {
         super.onActivityResult(request, result, data);
+        if (request == INSTALL_PERMISSION) {
+            if (getPackageManager().canRequestPackageInstalls()) installUpdate();
+            return;
+        }
+        if (request == INSTALL_UPDATE) {
+            if (result != RESULT_OK && updateFeedback != null) updateFeedback.setText("Установка не завершена. Можно повторить.");
+            return;
+        }
         if (request != VPN_PERMISSION) return;
         if (result == RESULT_OK) startVpn();
         else notice = "Разрешение Android на создание VPN не выдано.";

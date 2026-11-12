@@ -30,6 +30,13 @@ final class TvCatalog {
 
     static List<RealityProfile> download(Context context)
             throws IOException, GeneralSecurityException, JSONException, CatalogNotConfigured {
+        byte[] secret = readKey(context);
+        String profiles = decrypt(secret, fetch(), AAD);
+        if (profiles.trim().isEmpty()) return java.util.Collections.emptyList();
+        return RealityProfile.parseList(profiles);
+    }
+
+    static byte[] readKey(Context context) throws IOException, CatalogNotConfigured {
         int resource = context.getResources().getIdentifier("catalog_key", "raw", context.getPackageName());
         if (resource == 0) throw new CatalogNotConfigured();
         Base64.Decoder decoder = Base64.getDecoder();
@@ -37,17 +44,22 @@ final class TvCatalog {
         try (InputStream input = context.getResources().openRawResource(resource)) {
             secret = decoder.decode(ProfileStore.read(input).trim());
         }
-        JSONObject catalog = new JSONObject(fetch());
+        if (secret.length != 32) throw new IOException("Повреждён ключ каталога.");
+        return secret;
+    }
+
+    static String decrypt(byte[] secret, String document, byte[] aad)
+            throws IOException, GeneralSecurityException, JSONException {
+        Base64.Decoder decoder = Base64.getDecoder();
+        JSONObject catalog = new JSONObject(document);
         if (catalog.getInt("version") != 2) throw new IOException("Версия каталога не поддерживается.");
         byte[] nonce = decoder.decode(catalog.getString("nonce"));
-        if (secret.length != 32 || nonce.length != 12) throw new IOException("Повреждён каталог.");
+        if (nonce.length != 12) throw new IOException("Повреждён каталог.");
 
         Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
         cipher.init(Cipher.DECRYPT_MODE, new SecretKeySpec(secret, "AES"), new GCMParameterSpec(128, nonce));
-        cipher.updateAAD(AAD);
-        String profiles = new String(cipher.doFinal(decoder.decode(catalog.getString("ciphertext"))), StandardCharsets.UTF_8);
-        if (profiles.trim().isEmpty()) return java.util.Collections.emptyList();
-        return RealityProfile.parseList(profiles);
+        cipher.updateAAD(aad);
+        return new String(cipher.doFinal(decoder.decode(catalog.getString("ciphertext"))), StandardCharsets.UTF_8);
     }
 
     private static String fetch() throws IOException {
