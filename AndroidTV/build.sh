@@ -17,6 +17,10 @@ work=$(mktemp -d "$project/.build/apk.XXXXXXXX")
 trap 'rm -rf "$work"' EXIT
 mkdir -p "$work/res/drawable-nodpi" "$work/generated" "$work/classes" "$work/dex"
 cp -R "$project/src/main/res/." "$work/res/"
+if [[ -n "${QOSMOS_TV_CATALOG_KEY_FILE:-}" ]]; then
+    mkdir -p "$work/res/raw"
+    install -m 600 "$QOSMOS_TV_CATALOG_KEY_FILE" "$work/res/raw/catalog_key.txt"
+fi
 swift -module-cache-path "$project/.build/swift-cache" "$project/../MacVPN/Icon.swift" "$work/icon.png"
 sips -z 192 192 "$work/icon.png" --out "$work/res/drawable-nodpi/qosmos_icon.png" >/dev/null
 swift -module-cache-path "$project/.build/swift-cache" "$project/MakeBanner.swift" "$work/icon.png" \
@@ -45,6 +49,7 @@ if [[ ! -f "$key" ]]; then
         -dname 'CN=Qosmos VPN Local Build'
 fi
 apk="$project/dist/Qosmos-TV.apk"
+if [[ -n "${QOSMOS_TV_CATALOG_KEY_FILE:-}" ]]; then apk="$project/dist/Qosmos-TV-Personal.apk"; fi
 "$tools/apksigner" sign --ks "$key" --ks-key-alias qosmos-tv --ks-pass pass:android \
     --out "$work/signed.apk" "$work/aligned.apk"
 "$tools/apksigner" verify "$work/signed.apk"

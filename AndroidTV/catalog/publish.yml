@@ -3,7 +3,7 @@ name: Publish encrypted TV catalog
 on:
   push:
     branches: [main]
-    paths: [profiles/**, devices/**, publish.mjs, .github/workflows/publish.yml]
+    paths: [profiles/**, publish.mjs, .github/workflows/publish.yml]
   workflow_dispatch:
 
 permissions:
@@ -23,6 +23,7 @@ jobs:
       - name: Encrypt and publish the catalog
         env:
           MIRROR_DEPLOY_KEY: ${{ secrets.MIRROR_DEPLOY_KEY }}
+          QOSMOS_CATALOG_KEY: ${{ secrets.QOSMOS_CATALOG_KEY }}
         run: |
           umask 077
           work=$(mktemp -d)
@@ -32,7 +33,8 @@ jobs:
           curl -fsS https://api.github.com/meta | jq -er '.ssh_keys[] | "github.com " + .' > "$work/known_hosts"
           export GIT_SSH_COMMAND="ssh -i $work/key -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$work/known_hosts"
           git clone --depth 1 --branch main git@github.com:alexfrokel/qosmos-tv-catalog.git "$work/mirror"
-          node publish.mjs profiles devices "$work/mirror/catalog.json"
+          node publish.mjs profiles "$work/mirror/catalog.json"
+          unset QOSMOS_CATALOG_KEY
           git -C "$work/mirror" add -- catalog.json
           git -C "$work/mirror" -c user.name='Qosmos catalog' -c user.email='actions@users.noreply.github.com' commit -m 'Publish encrypted catalog'
           git -C "$work/mirror" push origin HEAD:main

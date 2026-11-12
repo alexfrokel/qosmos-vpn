@@ -12,5 +12,4 @@ adb="${ADB:-$sdk/platform-tools/adb}"
 serial=$1
 "$adb" connect "$serial"
 "$adb" -s "$serial" get-state | grep -qx device
-"$adb" -s "$serial" install -r dist/Qosmos-TV.apk
-ADB="$adb" /bin/bash enroll-catalog.sh "$serial"
+"$adb" -s "$serial" install -r dist/Qosmos-TV-Personal.apk

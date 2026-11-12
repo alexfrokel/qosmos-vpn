@@ -1,7 +1,6 @@
 package com.alexfrokel.qosmos.tv;
 
-import android.security.keystore.KeyGenParameterSpec;
-import android.security.keystore.KeyProperties;
+import android.content.Context;
 
 import org.json.JSONException;
 import org.json.JSONObject;
@@ -12,70 +11,34 @@ import java.io.InputStream;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.security.GeneralSecurityException;
-import java.security.KeyPairGenerator;
-import java.security.KeyStore;
-import java.security.MessageDigest;
-import java.security.spec.MGF1ParameterSpec;
 import java.util.Base64;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
 
 import javax.crypto.Cipher;
 import javax.crypto.spec.GCMParameterSpec;
-import javax.crypto.spec.OAEPParameterSpec;
-import javax.crypto.spec.PSource;
 import javax.crypto.spec.SecretKeySpec;
 import javax.net.ssl.HttpsURLConnection;
 
 final class TvCatalog {
     private static final String URL = "https://raw.githubusercontent.com/alexfrokel/qosmos-tv-catalog/main/catalog.json";
     private static final String API = "https://api.github.com/repos/alexfrokel/qosmos-tv-catalog/contents/catalog.json";
-    private static final String ALIAS = "qosmos-tv-catalog-v1";
     private static final int LIMIT = 512 * 1024;
-    private static final byte[] AAD = "Qosmos TV catalog v1".getBytes(StandardCharsets.UTF_8);
+    private static final byte[] AAD = "Qosmos TV catalog v2".getBytes(StandardCharsets.UTF_8);
 
-    static final class Device {
-        final String id;
-        final String publicKey;
-        private final KeyStore.PrivateKeyEntry key;
+    static final class CatalogNotConfigured extends Exception { }
 
-        private Device(String id, String publicKey, KeyStore.PrivateKeyEntry key) {
-            this.id = id;
-            this.publicKey = publicKey;
-            this.key = key;
-        }
-    }
-
-    static synchronized Device device() throws GeneralSecurityException, IOException {
-        KeyStore store = KeyStore.getInstance("AndroidKeyStore");
-        store.load(null);
-        if (!store.containsAlias(ALIAS)) {
-            KeyPairGenerator generator = KeyPairGenerator.getInstance("RSA", "AndroidKeyStore");
-            generator.initialize(new KeyGenParameterSpec.Builder(ALIAS, KeyProperties.PURPOSE_DECRYPT)
-                .setKeySize(2048)
-                .setDigests(KeyProperties.DIGEST_SHA256)
-                .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_RSA_OAEP)
-                .build());
-            generator.generateKeyPair();
-        }
-        KeyStore.PrivateKeyEntry key = (KeyStore.PrivateKeyEntry) store.getEntry(ALIAS, null);
-        byte[] publicKey = key.getCertificate().getPublicKey().getEncoded();
-        byte[] fingerprint = MessageDigest.getInstance("SHA-256").digest(publicKey);
-        String id = Base64.getUrlEncoder().withoutPadding().encodeToString(fingerprint);
-        return new Device(id, Base64.getEncoder().encodeToString(publicKey), key);
-    }
-
-    static List<RealityProfile> download(Device device) throws IOException, GeneralSecurityException, JSONException {
-        JSONObject catalog = new JSONObject(fetch());
-        if (catalog.getInt("version") != 1) throw new IOException("Версия каталога не поддерживается.");
-        String wrapped = catalog.getJSONObject("devices").optString(device.id, "");
-        if (wrapped.isEmpty()) return null;
-
+    static List<RealityProfile> download(Context context)
+            throws IOException, GeneralSecurityException, JSONException, CatalogNotConfigured {
+        int resource = context.getResources().getIdentifier("catalog_key", "raw", context.getPackageName());
+        if (resource == 0) throw new CatalogNotConfigured();
         Base64.Decoder decoder = Base64.getDecoder();
-        Cipher unwrap = Cipher.getInstance("RSA/ECB/OAEPWithSHA-256AndMGF1Padding");
-        unwrap.init(Cipher.DECRYPT_MODE, device.key.getPrivateKey(),
-            new OAEPParameterSpec("SHA-256", "MGF1", MGF1ParameterSpec.SHA1, PSource.PSpecified.DEFAULT));
-        byte[] secret = unwrap.doFinal(decoder.decode(wrapped));
+        byte[] secret;
+        try (InputStream input = context.getResources().openRawResource(resource)) {
+            secret = decoder.decode(ProfileStore.read(input).trim());
+        }
+        JSONObject catalog = new JSONObject(fetch());
+        if (catalog.getInt("version") != 2) throw new IOException("Версия каталога не поддерживается.");
         byte[] nonce = decoder.decode(catalog.getString("nonce"));
         if (secret.length != 32 || nonce.length != 12) throw new IOException("Повреждён каталог.");
 

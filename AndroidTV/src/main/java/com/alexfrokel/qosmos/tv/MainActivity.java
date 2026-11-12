@@ -12,7 +12,6 @@ import android.os.Handler;
 import android.os.Looper;
 import android.text.InputType;
 import android.text.TextUtils;
-import android.util.Log;
 import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
@@ -64,18 +63,6 @@ public final class MainActivity extends Activity {
         super.onCreate(state);
         store = new ProfileStore(this);
         showHome(false);
-        openEnrollment(getIntent());
-    }
-
-    @Override protected void onNewIntent(Intent intent) {
-        super.onNewIntent(intent);
-        openEnrollment(intent);
-    }
-
-    private void openEnrollment(Intent intent) {
-        String challenge = intent.getStringExtra("qosmos.catalog.enroll");
-        if (challenge != null && challenge.matches("[a-f0-9]{32}")) showCatalog(challenge);
-        else if (intent.getBooleanExtra("qosmos.catalog.refresh", false)) showCatalog(null);
     }
 
     @Override protected void onResume() {
@@ -191,7 +178,7 @@ public final class MainActivity extends Activity {
         catalogRequest++;
         settingsChild = false;
         LinearLayout screen = settingsPage("Настройки");
-        Button catalog = button("Загрузить конфиг", () -> showCatalog(null));
+        Button catalog = button("Загрузить конфиг", this::showCatalog);
         addButton(screen, catalog, 54);
         addButton(screen, button("Ссылка подписки", this::showSource), 50);
         if (!store.source().isEmpty()) {
@@ -204,7 +191,7 @@ public final class MainActivity extends Activity {
         catalog.requestFocus();
     }
 
-    private void showCatalog(String enrollment) {
+    private void showCatalog() {
         int request = ++catalogRequest;
         settingsChild = true;
         LinearLayout screen = settingsPage("Загрузить конфиг");
@@ -213,7 +200,7 @@ public final class MainActivity extends Activity {
         screen.addView(feedback);
         LinearLayout choices = column();
         screen.addView(choices);
-        Button retry = button("Обновить каталог", () -> showCatalog(null));
+        Button retry = button("Обновить каталог", this::showCatalog);
         addButton(screen, retry, 50);
         retry.setVisibility(View.GONE);
         Button back = button("Назад", this::showSettings);
@@ -224,11 +211,10 @@ public final class MainActivity extends Activity {
             List<RealityProfile> available = null;
             String detail = "";
             try {
-                TvCatalog.Device device = TvCatalog.device();
-                if (enrollment != null) Log.i("QosmosTVCatalog", enrollment + " " + device.id + " " + device.publicKey);
-                available = TvCatalog.download(device);
-                if (available == null) detail = "Этот телевизор ещё не привязан. Код: " + device.id.substring(0, 8);
-                else if (available.isEmpty()) detail = "В каталоге пока нет профилей.";
+                available = TvCatalog.download(getApplicationContext());
+                if (available.isEmpty()) detail = "В каталоге пока нет профилей.";
+            } catch (TvCatalog.CatalogNotConfigured e) {
+                detail = "Для каталога установи персональный APK Qosmos TV.";
             } catch (IOException e) {
                 detail = "Каталог недоступен. Проверь подключение и попробуй ещё раз.";
             } catch (Exception e) {
