@@ -32,9 +32,16 @@ struct Profile: Codable, Equatable {
 
     var endpoint: String {
         if let cloudflareHost { return "\(cloudflareHost):443" }
-        if sshUser != nil { return "\(host):\(sshPort ?? 22) · SSH" }
+        if sshUser != nil { return "\(host):\(sshPort ?? 22)" }
         let address = host.contains(":") ? "[\(host)]" : host
         return "\(address):\(port)"
+    }
+
+    var protocolLabel: String {
+        if cloudflareHost != nil { return "VLESS + REALITY через Cloudflare Tunnel" }
+        if security == "ssh" { return "SSH" }
+        if sshUser != nil { return "VLESS + REALITY через SSH" }
+        return "VLESS + REALITY"
     }
 }
 
@@ -819,6 +826,10 @@ struct VPNView: View {
                         Text(profile.name).font(.system(size: 14, weight: .semibold)).lineLimit(1)
                         Text(profile.endpoint).font(.system(size: 11, design: .monospaced))
                             .foregroundStyle(muted).lineLimit(1)
+                        Text(preferences.text(profile.protocolLabel))
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundStyle(accent)
+                            .fixedSize(horizontal: false, vertical: true)
                     } else {
                         Text(preferences.text("Добавьте профиль VLESS Reality"))
                             .font(.system(size: 13, weight: .medium))
@@ -1016,6 +1027,7 @@ struct VPNView: View {
         let direct = entry.profile.sshUser == nil && entry.profile.cloudflareHost == nil
         let configuredExit = direct && entry.profile.entryIsIPAddress ? entry.profile.entryHost : nil
         return Grid(alignment: .leading, horizontalSpacing: 8, verticalSpacing: 3) {
+            routeLine("Протокол", value: preferences.text(entry.profile.protocolLabel), isIP: false)
             routeLine("Вход", value: entryIP ?? entry.profile.entryHost, isIP: entryIP != nil)
             routeLine("Выход", value: entry.exitIP ?? configuredExit ?? preferences.text("После подключения"),
                       isIP: entry.exitIP != nil || configuredExit != nil)

@@ -65,6 +65,9 @@
 "Сбросить настройки и удалить профили" = "Reset settings and delete profiles";
 "Сбросить настройки и удалить профили?" = "Reset settings and delete profiles?";
 "Системный VPN активен." = "The system VPN is active.";
+"Протокол" = "Protocol";
+"VLESS + REALITY через SSH" = "VLESS + REALITY over SSH";
+"VLESS + REALITY через Cloudflare Tunnel" = "VLESS + REALITY over Cloudflare Tunnel";
 "Скачать" = "Download";
 "Обновить" = "Update";
 "Приложение" = "Application";
