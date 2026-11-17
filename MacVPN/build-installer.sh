@@ -32,6 +32,13 @@ mv "$app" "$work/apps/"
 app="$work/apps/Qosmos VPN.app"
 if [[ $# == 2 ]]; then
     /usr/bin/ditto -c -k --keepParent "$app" "$2"
+    # Exercise the same archive validation that runs in an installed copy of Qosmos.
+    mkdir "$work/check-update"
+    cp "$2" "$work/check-update/update.zip"
+    cp "$source_dir/update_installer.py" "$work/check-update/"
+    digest=$(/usr/bin/shasum -a 256 "$2" | /usr/bin/awk '{print $1}')
+    "$app/Contents/Resources/python/bin/python3" -I -B "$work/check-update/update_installer.py" \
+        prepare "$app" "$version" "$digest"
 fi
 pkgbuild --analyze --root "$work/apps" "$work/app-properties.plist"
 if ! /usr/libexec/PlistBuddy -c 'Set :0:BundleIsRelocatable false' "$work/app-properties.plist" 2>/dev/null; then

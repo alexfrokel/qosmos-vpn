@@ -60,7 +60,24 @@ codesign --force --sign - "$app/Contents/Resources/xray" "$app/Contents/Resource
 if [[ -n "${QOSMOS_PYTHON_DIR:-}" ]]; then
     test -x "$QOSMOS_PYTHON_DIR/bin/python3"
     ditto --norsrc "$QOSMOS_PYTHON_DIR" "$resources/python"
-    find "$resources/python" -type f \( -name '*.so' -o -name '*.dylib' -o -name 'python3.*' \) -print0 |
+    # Older Qosmos updaters only accept regular files and directories in the ZIP.
+    # Materialize Python's file aliases before signing the bundle.
+    /usr/bin/python3 - "$resources/python" <<'PY'
+from pathlib import Path
+import shutil
+import sys
+
+runtime = Path(sys.argv[1]).resolve()
+for path in runtime.rglob("*"):
+    if path.is_symlink():
+        target = path.resolve(strict=True)
+        if not target.is_file() or runtime not in target.parents:
+            raise SystemExit(f"Unexpected Python runtime link: {path.relative_to(runtime)}")
+        path.unlink()
+        shutil.copy2(target, path)
+PY
+    find "$resources/python" -type f \( -name '*.so' -o -name '*.dylib' -o -name 'python3.*' \
+        -o -name python3 -o -name python \) -print0 |
         while IFS= read -r -d '' executable; do
             if file -b "$executable" | /usr/bin/grep -q '^Mach-O'; then
                 codesign --force --sign - "$executable"
