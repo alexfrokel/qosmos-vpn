@@ -49,6 +49,7 @@ struct BackendEvent: Decodable {
     let kind: String
     let message: String
     let entryIP: String?
+    let detail: String?
 }
 
 struct AppError: LocalizedError {
@@ -562,7 +563,7 @@ final class VPNModel: ObservableObject {
             internetBlocked = false
             exitIP = event.message
             rememberRoute(entryIP: event.entryIP, exitIP: event.message)
-            detail = "Системный VPN активен."
+            detail = event.detail ?? "Системный VPN активен."
             preferences.record("VPN connected")
         case "disconnected":
             detail = event.message

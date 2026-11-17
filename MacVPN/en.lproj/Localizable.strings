@@ -124,7 +124,15 @@
 "Остановить переподключение" = "Stop reconnecting";
 "Восстанавливаем соединение с VPN…" = "Reconnecting to the VPN…";
 "Повторяем проверку HTTPS через VPN…" = "Retrying the HTTPS check through the VPN…";
-"Xray запустился, но через VPN не ответили оба проверочных HTTPS-адреса." = "Xray started, but neither HTTPS check responded through the VPN.";
+"DNS не смог определить адрес сервера VPN." = "DNS could not resolve the VPN server address.";
+"Сервер отклонил TCP-подключение. Проверьте порт и службу VPN на сервере." = "The server refused the TCP connection. Check the VPN port and service on the server.";
+"Сервер VPN не ответил на TCP-подключение. Проверьте адрес и порт профиля." = "The TCP connection to the VPN server timed out. Check the profile address and port.";
+"Не удалось открыть TCP-подключение к серверу VPN." = "Could not open a TCP connection to the VPN server.";
+"TCP до сервера работает, но через VLESS + REALITY не ответили оба проверочных HTTPS-адреса." = "The server accepted TCP, but neither HTTPS check responded through VLESS + REALITY.";
+"VPN работает. Проверка DNS не прошла, но HTTPS по IP отвечает." = "The VPN is working. The DNS check failed, but HTTPS by IP responded.";
+"VPN работает. Проверка по имени не прошла, но HTTPS по IP отвечает." = "The VPN is working. The hostname check failed, but HTTPS by IP responded.";
+"Нет ответа HTTPS через VPN. Восстанавливаем соединение…" = "No HTTPS response through the VPN. Reconnecting…";
+"Выходной IP изменился. Перепроверяем маршрут VPN…" = "The exit IP changed. Checking the VPN route again…";
 "Туннель запустился, но через VPN не ответили оба проверочных HTTPS-адреса." = "The tunnel started, but neither HTTPS check responded through the VPN.";
 "Доступ в интернет восстановлен." = "Internet access restored.";
 "Не удалось запустить туннель с Kill Switch." = "Could not start the tunnel with Kill Switch enabled.";

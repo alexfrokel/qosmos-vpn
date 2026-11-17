@@ -18,6 +18,7 @@ import time
 import uuid
 from contextlib import ExitStack
 from pathlib import Path
+from typing import NamedTuple, Optional
 from urllib.parse import parse_qs, unquote, urlsplit
 
 RESOURCES = Path(__file__).resolve().parent
@@ -55,6 +56,19 @@ class ProfileError(ValueError):
 
 class HTTPSProbeError(ProfileError):
     pass
+
+
+class ProbeResult(NamedTuple):
+    address: Optional[ipaddress.IPv4Address]
+    hostname_error: Optional[int] = None
+    used_fallback: bool = False
+
+    def connection_detail(self):
+        if not self.used_fallback:
+            return None
+        if self.hostname_error == 6:
+            return "VPN работает. Проверка DNS не прошла, но HTTPS по IP отвечает."
+        return "VPN работает. Проверка по имени не прошла, но HTTPS по IP отвечает."
 
 
 def parse_link(link, fallback):
@@ -248,25 +262,32 @@ def port_ready(port, proxy, attempts=40):
     raise ProfileError("Xray не смог открыть локальный прокси.")
 
 
-def probe(proxy_port=None):
+def check_connection(proxy_port=None):
     proxy_args = ["--noproxy", "*"] if proxy_port is None else [
         "--noproxy", "", "--proxy", f"socks5h://127.0.0.1:{proxy_port}",
     ]
+    hostname_error = None
     for url in (CHECK_URL, FALLBACK_CHECK_URL):
         result = subprocess.run(
             ["/usr/bin/curl", "-q", "-4fsS", *proxy_args, "--connect-timeout", "4", "--max-time", "7", url],
             capture_output=True, text=True,
         )
         if result.returncode != 0:
+            if url == CHECK_URL:
+                hostname_error = result.returncode
             continue
         address = result.stdout.strip()
         if url == FALLBACK_CHECK_URL:
             address = next((line[3:] for line in address.splitlines() if line.startswith("ip=")), "")
         try:
-            return ipaddress.IPv4Address(address)
+            return ProbeResult(ipaddress.IPv4Address(address), hostname_error, url == FALLBACK_CHECK_URL)
         except ValueError:
             continue
-    return None
+    return ProbeResult(None, hostname_error)
+
+
+def probe(proxy_port=None):
+    return check_connection(proxy_port).address
 
 
 def tunnel_exists():
@@ -731,17 +752,24 @@ def monitor_connection(service, proxy, bridge, app_pid, upstream_ip, probe_port=
     global wake_requested
     next_check = time.monotonic() + HEALTH_CHECK_INTERVAL
     failures = 0
+    reason = None
     while os.getppid() == app_pid and proxy.poll() is None and tunnel_exists():
         if wake_requested or (bridge is not None and bridge.poll() is not None):
             break
         if select.select([service], [], [], 1)[0]:
             break
         if time.monotonic() >= next_check:
-            failures = 0 if probe(probe_port) == upstream_ip else failures + 1
+            check = check_connection(probe_port)
+            failures = 0 if check.address == upstream_ip else failures + 1
             if failures >= HEALTH_CHECK_FAILURE_LIMIT:
+                if check.address is None:
+                    reason = "Нет ответа HTTPS через VPN. Восстанавливаем соединение…"
+                else:
+                    reason = "Выходной IP изменился. Перепроверяем маршрут VPN…"
                 break
             next_check = time.monotonic() + (2 if failures else HEALTH_CHECK_INTERVAL)
     wake_requested = False
+    return reason
 
 
 def run_connection(profile, protect, direct_sites, direct_ru, app_pid, previous_endpoint=None,
@@ -760,12 +788,18 @@ def run_connection(profile, protect, direct_sites, direct_ru, app_pid, previous_
             try:
                 with socket.create_connection((str(previous_endpoint or profile["host"]), server_port), timeout=6) as server:
                     endpoint = ipaddress.ip_address(server.getpeername()[0].split("%")[0])
+            except socket.gaierror as error:
+                raise ProfileError("DNS не смог определить адрес сервера VPN.") from error
+            except ConnectionRefusedError as error:
+                raise ProfileError("Сервер отклонил TCP-подключение. Проверьте порт и службу VPN на сервере.") from error
+            except TimeoutError as error:
+                raise ProfileError("Сервер VPN не ответил на TCP-подключение. Проверьте адрес и порт профиля.") from error
             except OSError as error:
-                raise ProfileError("Сервер профиля недоступен. Проверьте адрес и подключение к интернету.") from error
+                raise ProfileError("Не удалось открыть TCP-подключение к серверу VPN.") from error
             port, proxy, bridge = start_xray(profile, endpoint, stack)
             upstream_ip = probe(port)
             if upstream_ip is None:
-                raise HTTPSProbeError("Xray запустился, но через VPN не ответили оба проверочных HTTPS-адреса.")
+                raise HTTPSProbeError("TCP до сервера работает, но через VLESS + REALITY не ответили оба проверочных HTTPS-адреса.")
         if deferred_sites and not direct_sites:
             direct_sites.extend(resolve_direct_sites(deferred_sites, port))
         say("progress", "Запускаем системный туннель…")
@@ -782,7 +816,8 @@ def run_connection(profile, protect, direct_sites, direct_ru, app_pid, previous_
                 say("progress", "Проверяем выход в интернет через VPN…")
                 observed_ip = None
                 for _ in range(2):
-                    current_ip = probe(port if vpn_sites else None)
+                    check = check_connection(port if vpn_sites else None)
+                    current_ip = check.address
                     if current_ip == upstream_ip:
                         break
                     if current_ip is not None:
@@ -791,10 +826,10 @@ def run_connection(profile, protect, direct_sites, direct_ru, app_pid, previous_
                     if observed_ip is None:
                         raise HTTPSProbeError("Туннель запустился, но через VPN не ответили оба проверочных HTTPS-адреса.")
                     raise ProfileError("Системный маршрут не совпал с выходом через VPS. Отключите другие VPN и повторите.")
-                say("connected", str(upstream_ip), entryIP=str(endpoint))
-                monitor_connection(service, proxy, bridge, app_pid, upstream_ip, port if vpn_sites else None)
+                say("connected", str(upstream_ip), entryIP=str(endpoint), detail=check.connection_detail())
+                reason = monitor_connection(service, proxy, bridge, app_pid, upstream_ip, port if vpn_sites else None)
                 if os.getppid() == app_pid:
-                    say("reconnecting", "Восстанавливаем соединение с VPN…")
+                    say("reconnecting", reason or "Восстанавливаем соединение с VPN…")
         finally:
             stop_proxy(proxy)
             for _ in range(40):
