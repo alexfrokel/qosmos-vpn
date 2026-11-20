@@ -4,6 +4,12 @@ import Darwin
 import SwiftUI
 import UniformTypeIdentifiers
 
+struct XHTTPSettings: Codable, Equatable {
+    let path: String?
+    let host: String?
+    let mode: String?
+}
+
 struct Profile: Codable, Equatable {
     var name: String
     let host: String
@@ -22,6 +28,7 @@ struct Profile: Codable, Equatable {
     var sshUser: String?
     var sshPort: Int?
     var sshIdentity: String?
+    var xhttpSettings: XHTTPSettings?
 
     var entryHost: String { cloudflareHost ?? host }
     var entryIsIPAddress: Bool {
@@ -40,8 +47,9 @@ struct Profile: Codable, Equatable {
     var protocolLabel: String {
         if cloudflareHost != nil { return "VLESS + REALITY через Cloudflare Tunnel" }
         if security == "ssh" { return "SSH" }
-        if sshUser != nil { return "VLESS + REALITY через SSH" }
-        return "VLESS + REALITY"
+        let transport = network == "xhttp" ? "VLESS + XHTTP + REALITY" : "VLESS + REALITY"
+        if sshUser != nil { return "\(transport) через SSH" }
+        return transport
     }
 }
 

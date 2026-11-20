@@ -98,6 +98,14 @@ def parse_link(link, fallback):
             "shortID": query.get("sid", ""),
             "spider": query.get("spx", ""),
         }
+        if profile["network"] == "xhttp":
+            profile["xhttpSettings"] = {
+                key: query[key] for key in ("path", "host", "mode") if key in query
+            }
+            if any(key in query for key in ("downloadSettings", "fm")) or (
+                "extra" in query and query["extra"] and json.loads(query["extra"]) != {}
+            ):
+                raise ProfileError("Дополнительные параметры XHTTP пока не поддерживаются.")
         if "cfHost" in query:
             profile["cloudflareHost"] = query["cfHost"]
         if "sshUser" in query:
@@ -113,10 +121,27 @@ def parse_link(link, fallback):
 
 def validate(profile):
     local_ssh = profile.get("security") == "ssh" and profile.get("sshUser") == "qosmos-local"
-    if (profile.get("security") != "reality" and not local_ssh) or profile.get("network") not in ("tcp", "raw"):
-        raise ProfileError("Поддерживаются профили VLESS Reality с транспортом TCP (RAW).")
+    network = profile.get("network")
+    if (profile.get("security") != "reality" and not local_ssh) or network not in ("tcp", "raw", "xhttp"):
+        raise ProfileError("Поддерживаются профили VLESS Reality с транспортом TCP (RAW) или XHTTP.")
     if profile.get("flow") not in ("", "xtls-rprx-vision", "xtls-rprx-vision-udp443"):
         raise ProfileError("Этот режим VLESS flow пока не поддерживается.")
+    if network == "xhttp":
+        if local_ssh or profile.get("flow"):
+            raise ProfileError("Для VLESS + XHTTP требуется REALITY без XTLS Vision.")
+        if profile.get("cloudflareHost"):
+            raise ProfileError("Для XHTTP используйте прямой адрес сервера или вход через SSH.")
+        settings = profile.get("xhttpSettings", {})
+        if not isinstance(settings, dict) or settings.keys() - {"path", "host", "mode"}:
+            raise ProfileError("Дополнительные параметры XHTTP пока не поддерживаются.")
+        path = settings.get("path", "/")
+        if not isinstance(path, str) or not path.startswith("/") or re.search(r"[\x00-\x20\x7f#]", path):
+            raise ProfileError("Путь XHTTP должен начинаться с / и не содержать пробелов.")
+        http_host = settings.get("host", "")
+        if not isinstance(http_host, str) or not re.fullmatch(r"[A-Za-z0-9.:\[\]-]*", http_host):
+            raise ProfileError("Некорректный HTTP Host для XHTTP.")
+        if settings.get("mode", "auto") not in ("auto", "packet-up", "stream-up", "stream-one"):
+            raise ProfileError("Неизвестный режим XHTTP.")
     if profile.get("encryption") != "none":
         raise ProfileError("Этот профиль использует дополнительное шифрование VLESS.")
     host = profile.get("host")
@@ -176,6 +201,12 @@ def from_xray_json(source, fallback):
             settings = outbound["settings"]
             stream = outbound["streamSettings"]
             reality = stream.get("realitySettings", {})
+            network = stream.get("network", "tcp")
+            transport = {}
+            if network in ("xhttp", "splithttp"):
+                field = "xhttpSettings" if network == "xhttp" else "splithttpSettings"
+                transport["xhttpSettings"] = stream.get(field, stream.get("xhttpSettings", {}))
+                network = "xhttp"
             servers = settings.get("vnext") or [{
                 "address": settings["address"], "port": settings["port"], "users": [settings],
             }]
@@ -186,7 +217,7 @@ def from_xray_json(source, fallback):
                         "host": server["address"], "port": server["port"],
                         "user": user["id"], "flow": user.get("flow", ""),
                         "encryption": user.get("encryption", "none"),
-                        "network": stream.get("network", "tcp"), "security": stream.get("security", ""),
+                        "network": network, "security": stream.get("security", ""), **transport,
                         "sni": reality.get("serverName", ""), "fingerprint": reality.get("fingerprint", "chrome"),
                         "key": reality.get("password") or reality.get("publicKey", ""),
                         "shortID": reality.get("shortId", ""), "spider": reality.get("spiderX", ""),
@@ -212,6 +243,8 @@ def parse_profiles(source, fallback):
 
 def configs(profile, endpoint, port):
     stream_settings = {"network": "raw", "security": "none"}
+    if profile["network"] == "xhttp":
+        stream_settings.update(network="xhttp", xhttpSettings=profile.get("xhttpSettings", {}))
     if profile["security"] == "reality":
         stream_settings.update(security="reality", realitySettings={
             "serverName": profile["sni"] or profile["host"],
@@ -823,9 +856,10 @@ def run_connection(profile, protect, direct_sites, direct_ru, app_pid, previous_
             check = check_connection(port)
             upstream_ip = check.address
             if upstream_ip is None:
+                protocol = "VLESS + XHTTP + REALITY" if profile["network"] == "xhttp" else "VLESS + REALITY"
                 if check.received_http:
-                    raise HTTPSProbeError("Через VLESS + REALITY получен ответ HTTPS, но проверочные адреса не вернули выходной IPv4.")
-                raise HTTPSProbeError("TCP до сервера работает, но через VLESS + REALITY не получен ни один ответ HTTPS.")
+                    raise HTTPSProbeError(f"Через {protocol} получен ответ HTTPS, но проверочные адреса не вернули выходной IPv4.")
+                raise HTTPSProbeError(f"TCP до сервера работает, но через {protocol} не получен ни один ответ HTTPS.")
         if deferred_sites and not direct_sites:
             direct_sites.extend(resolve_direct_sites(deferred_sites, port))
         say("progress", "Запускаем системный туннель…")
