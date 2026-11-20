@@ -152,7 +152,7 @@ private func tunnelConfig(address: [UInt8], port: Int, split: SplitTunnel?, clou
     outbounds[0]["server_port"] = port
     config["inbounds"] = inbounds
     config["outbounds"] = outbounds
-    try split?.configure(&config, uid: uid)
+    try split?.configure(&config, uid: uid, serviceDirectory: directory)
     return try JSONSerialization.data(withJSONObject: config)
 }
 

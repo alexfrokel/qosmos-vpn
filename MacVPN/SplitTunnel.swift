@@ -182,7 +182,7 @@ struct SplitTunnel {
         config["experimental"] = experimental
     }
 
-    func configure(_ config: inout [String: Any], uid: uid_t) throws {
+    func configure(_ config: inout [String: Any], uid: uid_t, serviceDirectory: URL) throws {
         if !vpnSites.isEmpty {
             try Self.configureVPNOnly(&config, sites: vpnSites, interface: interface,
                                       cachePath: "/private/var/run/qosmos-fakeip-\(uid).db")
@@ -216,16 +216,25 @@ struct SplitTunnel {
                 "action": "route", "outbound": "qosmos-direct"
             ]
         }
+        let russianSiteMatch: [String: Any]
         if directRuSites {
+            let data = try Data(contentsOf: serviceDirectory.appendingPathComponent("ru-direct-domains.json"))
+            let domains = try JSONDecoder().decode([String: [String]].self, from: data)
+            guard let exact = domains["domain"], let suffixes = domains["domain_suffix"],
+                  !exact.isEmpty, !suffixes.isEmpty,
+                  exact.allSatisfy(Self.validHost), suffixes.allSatisfy(Self.validHost) else { throw SplitError.invalidTemplate }
+            russianSiteMatch = ["domain": exact, "domain_suffix": Self.russianDomainSuffixes + suffixes]
             directRules.append([
                 "type": "logical", "mode": "and",
                 "rules": [
-                    ["domain_suffix": Self.russianDomainSuffixes, "network": "tcp", "port": [80, 443], "protocol": ["http", "tls"]],
+                    russianSiteMatch.merging(["network": "tcp", "port": [80, 443], "protocol": ["http", "tls"]]) { _, new in new },
                     ["ip_cidr": ["0.0.0.0/0"]],
                     ["ip_cidr": Self.nonPublicIPv4, "invert": true]
                 ],
                 "action": "route", "outbound": "qosmos-direct"
             ])
+        } else {
+            russianSiteMatch = [:]
         }
         route["rules"] = [sniff] + directRules + defaultRules
         config["route"] = route
@@ -252,9 +261,9 @@ struct SplitTunnel {
             servers.append(directDNS)
             dns["servers"] = servers
             dnsRules += [
-                ["domain_suffix": Self.russianDomainSuffixes, "query_type": ["AAAA", "HTTPS", "SVCB"],
-                 "action": "predefined", "rcode": "NOERROR"],
-                ["domain_suffix": Self.russianDomainSuffixes, "action": "route", "server": "qosmos-direct-dns"]
+                russianSiteMatch.merging(["query_type": ["AAAA", "HTTPS", "SVCB"],
+                                          "action": "predefined", "rcode": "NOERROR"]) { _, new in new },
+                russianSiteMatch.merging(["action": "route", "server": "qosmos-direct-dns"]) { _, new in new }
             ]
         }
         dns["rules"] = dnsRules + (dns["rules"] as? [[String: Any]] ?? [])

@@ -494,8 +494,8 @@ struct QosmosSettingsView: View {
                 .font(.system(size: 12)).foregroundStyle(.secondary)
             if !only {
                 Divider()
-                row("Сайты .ru и .рф напрямую", "Открывать сайты .ru, .рф и их поддомены через обычное подключение. Применяется после переподключения.") {
-                    Toggle(preferences.text("Сайты .ru и .рф напрямую"), isOn: $preferences.directRuSites)
+                row("Российские сайты напрямую", "Сайты .ru, .рф и домены из встроенного списка открываются через обычное подключение. Применяется после переподключения.") {
+                    Toggle(preferences.text("Российские сайты напрямую"), isOn: $preferences.directRuSites)
                         .labelsHidden().toggleStyle(.switch)
                 }
             }

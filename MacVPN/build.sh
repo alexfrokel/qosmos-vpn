@@ -24,6 +24,7 @@ if [[ -n "${QOSMOS_DIRECT_SITES:-}" ]]; then
 fi
 install -m 0644 "$source_dir/en.lproj/Localizable.strings" "$resources/en.lproj/Localizable.strings"
 install -m 0644 "$source_dir/tun-template.json" "$resources/mac-vpn.json"
+install -m 0644 "$source_dir/ru-direct-domains.LICENSE" "$resources/ru-direct-domains.LICENSE"
 install -m 0755 "$engines/xray-test" "$resources/xray"
 install -m 0755 "$engines/sing-box" "$resources/sing-box"
 for license in xray-LICENSE sing-box-LICENSE; do
@@ -45,13 +46,14 @@ service_dir="$package_root/Library/Application Support/QosmosVPN"
 mkdir -p "$service_dir" "$package_root/Library/LaunchDaemons"
 install -m 0644 "$source_dir/local.vlessvpn.tunnel.plist" "$package_root/Library/LaunchDaemons/"
 install -m 0644 "$source_dir/tun-template.json" "$service_dir/tun-template.json"
+install -m 0644 "$source_dir/ru-direct-domains.json" "$service_dir/ru-direct-domains.json"
 install -m 0755 "$engines/sing-box" "$service_dir/sing-box"
 xcrun swiftc -target "$swift_target" -O -module-cache-path "$module_cache" \
     "$source_dir/TunnelService.swift" "$source_dir/KillSwitch.swift" "$source_dir/SplitTunnel.swift" \
     -o "$service_dir/tunnel-service"
 codesign --force --sign - "$service_dir/tunnel-service" "$service_dir/sing-box"
 COPYFILE_DISABLE=1 pkgbuild --root "$package_root" --scripts "$source_dir/tunnel-installer" \
-    --install-location / --ownership recommended --identifier local.vlessvpn.tunnel.pkg --version 10 \
+    --install-location / --ownership recommended --identifier local.vlessvpn.tunnel.pkg --version 11 \
     "$resources/Qosmos Tunnel.pkg"
 xcrun swiftc -target "$swift_target" -parse-as-library -O -module-cache-path "$module_cache" \
     "$source_dir/VlessVPN.swift" "$source_dir/AppSettings.swift" "$source_dir/ServerSetup.swift" \

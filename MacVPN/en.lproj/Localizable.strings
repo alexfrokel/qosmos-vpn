@@ -142,8 +142,8 @@
 "macOS запросит пароль для установки или обновления службы Qosmos VPN." = "macOS will ask for a password to install or upgrade the Qosmos VPN service.";
 "Не удалось направить DNS macOS в туннель VPN." = "Could not route macOS DNS through the VPN tunnel.";
 "Сайты напрямую" = "Sites outside the VPN";
-"Сайты .ru и .рф напрямую" = "Bypass VPN for .ru and .рф sites";
-"Открывать сайты .ru, .рф и их поддомены через обычное подключение. Применяется после переподключения." = "Open .ru and .рф sites and their subdomains through your normal connection. Applies after reconnecting.";
+"Российские сайты напрямую" = "Bypass VPN for Russian sites";
+"Сайты .ru, .рф и домены из встроенного списка открываются через обычное подключение. Применяется после переподключения." = ".ru and .рф sites and domains on the built-in list use your normal connection. Applies after reconnecting.";
 "Введите до 20 доменов через запятую. Добавляйте поддомены отдельно. Применяется после переподключения." = "Enter up to 20 comma-separated domains. Add subdomains separately. Changes apply when you reconnect.";
 "Не удалось настроить сайты напрямую. Проверьте адреса и подключение по Wi-Fi или Ethernet." = "Could not set up direct sites. Check the addresses and your Wi-Fi or Ethernet connection.";
 "Укажите до 20 доменов сайтов напрямую, через запятую." = "Enter up to 20 comma-separated domains for direct sites.";
