@@ -131,12 +131,14 @@
 "Сервер отклонил TCP-подключение. Проверьте порт и службу VPN на сервере." = "The server refused the TCP connection. Check the VPN port and service on the server.";
 "Сервер VPN не ответил на TCP-подключение. Проверьте адрес и порт профиля." = "The TCP connection to the VPN server timed out. Check the profile address and port.";
 "Не удалось открыть TCP-подключение к серверу VPN." = "Could not open a TCP connection to the VPN server.";
-"TCP до сервера работает, но через VLESS + REALITY не ответили оба проверочных HTTPS-адреса." = "The server accepted TCP, but neither HTTPS check responded through VLESS + REALITY.";
+"TCP до сервера работает, но через VLESS + REALITY не получен ни один ответ HTTPS." = "The server accepted TCP, but no HTTPS response came through VLESS + REALITY.";
+"Через VLESS + REALITY получен ответ HTTPS, но проверочные адреса не вернули выходной IPv4." = "HTTPS responded through VLESS + REALITY, but the check endpoints returned no exit IPv4 address.";
+"VPN работает. Выход проверен через резервный HTTPS-адрес." = "The VPN is working. The exit address was verified using a backup HTTPS endpoint.";
 "VPN работает. Проверка DNS не прошла, но HTTPS по IP отвечает." = "The VPN is working. The DNS check failed, but HTTPS by IP responded.";
 "VPN работает. Проверка по имени не прошла, но HTTPS по IP отвечает." = "The VPN is working. The hostname check failed, but HTTPS by IP responded.";
 "Нет ответа HTTPS через VPN. Восстанавливаем соединение…" = "No HTTPS response through the VPN. Reconnecting…";
 "Выходной IP изменился. Перепроверяем маршрут VPN…" = "The exit IP changed. Checking the VPN route again…";
-"Туннель запустился, но через VPN не ответили оба проверочных HTTPS-адреса." = "The tunnel started, but neither HTTPS check responded through the VPN.";
+"Системный туннель запустился, но проверка не получила выходной IPv4 через VPN." = "The system tunnel started, but the check could not obtain an exit IPv4 address through the VPN.";
 "Доступ в интернет восстановлен." = "Internet access restored.";
 "Не удалось запустить туннель с Kill Switch." = "Could not start the tunnel with Kill Switch enabled.";
 "macOS запросит пароль для установки или обновления службы Qosmos VPN." = "macOS will ask for a password to install or upgrade the Qosmos VPN service.";

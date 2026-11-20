@@ -16,6 +16,7 @@ import sys
 import tempfile
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack
 from pathlib import Path
 from typing import NamedTuple, Optional
@@ -26,6 +27,7 @@ XRAY = RESOURCES / "xray"
 SING_BOX = RESOURCES / "sing-box"
 CHECK_URL = "https://api.ipify.org/"
 FALLBACK_CHECK_URL = "https://1.1.1.1/cdn-cgi/trace"
+AWS_CHECK_URL = "https://checkip.amazonaws.com/"
 HEALTH_CHECK_INTERVAL = 20
 HEALTH_CHECK_FAILURE_LIMIT = 3
 wake_requested = False
@@ -61,10 +63,13 @@ class HTTPSProbeError(ProfileError):
 class ProbeResult(NamedTuple):
     address: Optional[ipaddress.IPv4Address]
     hostname_error: Optional[int] = None
-    used_fallback: bool = False
+    source: Optional[str] = None
+    received_http: bool = False
 
     def connection_detail(self):
-        if not self.used_fallback:
+        if self.source == AWS_CHECK_URL:
+            return "VPN работает. Выход проверен через резервный HTTPS-адрес."
+        if self.source != FALLBACK_CHECK_URL:
             return None
         if self.hostname_error == 6:
             return "VPN работает. Проверка DNS не прошла, но HTTPS по IP отвечает."
@@ -262,28 +267,46 @@ def port_ready(port, proxy, attempts=40):
     raise ProfileError("Xray не смог открыть локальный прокси.")
 
 
-def check_connection(proxy_port=None):
+def check_https_address(url, proxy_args):
+    result = subprocess.run(
+        ["/usr/bin/curl", "-q", "-4fsS", *proxy_args, "--connect-timeout", "4", "--max-time", "7",
+         "--write-out", "\n%{http_code}", url],
+        capture_output=True, text=True,
+    )
+    body, _, status = result.stdout.rpartition("\n")
+    received_http = status.isdigit() and 100 <= int(status) < 600
+    address = None
+    if result.returncode == 0 and status == "200":
+        address_text = body.strip()
+        if url == FALLBACK_CHECK_URL:
+            address_text = next((line[3:] for line in body.splitlines() if line.startswith("ip=")), "")
+        try:
+            address = ipaddress.IPv4Address(address_text)
+        except ValueError:
+            pass
+    return address, result.returncode, received_http
+
+
+def check_connection(proxy_port=None, expected_ip=None):
     proxy_args = ["--noproxy", "*"] if proxy_port is None else [
         "--noproxy", "", "--proxy", f"socks5h://127.0.0.1:{proxy_port}",
     ]
-    hostname_error = None
-    for url in (CHECK_URL, FALLBACK_CHECK_URL):
-        result = subprocess.run(
-            ["/usr/bin/curl", "-q", "-4fsS", *proxy_args, "--connect-timeout", "4", "--max-time", "7", url],
-            capture_output=True, text=True,
-        )
-        if result.returncode != 0:
-            if url == CHECK_URL:
-                hostname_error = result.returncode
-            continue
-        address = result.stdout.strip()
-        if url == FALLBACK_CHECK_URL:
-            address = next((line[3:] for line in address.splitlines() if line.startswith("ip=")), "")
-        try:
-            return ProbeResult(ipaddress.IPv4Address(address), hostname_error, url == FALLBACK_CHECK_URL)
-        except ValueError:
-            continue
-    return ProbeResult(None, hostname_error)
+    address, hostname_error, received_http = check_https_address(CHECK_URL, proxy_args)
+    primary = ProbeResult(address, hostname_error, CHECK_URL, received_http)
+    if address is not None and (expected_ip is None or address == expected_ip):
+        return primary
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        pending = {url: pool.submit(check_https_address, url, proxy_args) for url in (FALLBACK_CHECK_URL, AWS_CHECK_URL)}
+        best = primary
+        for url, future in pending.items():
+            address, _, replied = future.result()
+            received_http = received_http or replied
+            if address is not None and (expected_ip is None or address == expected_ip):
+                return ProbeResult(address, hostname_error, url, received_http)
+            if best.address is None and address is not None:
+                best = ProbeResult(address, hostname_error, url)
+    return best._replace(received_http=received_http)
 
 
 def probe(proxy_port=None):
@@ -759,7 +782,7 @@ def monitor_connection(service, proxy, bridge, app_pid, upstream_ip, probe_port=
         if select.select([service], [], [], 1)[0]:
             break
         if time.monotonic() >= next_check:
-            check = check_connection(probe_port)
+            check = check_connection(probe_port, expected_ip=upstream_ip)
             failures = 0 if check.address == upstream_ip else failures + 1
             if failures >= HEALTH_CHECK_FAILURE_LIMIT:
                 if check.address is None:
@@ -797,9 +820,12 @@ def run_connection(profile, protect, direct_sites, direct_ru, app_pid, previous_
             except OSError as error:
                 raise ProfileError("Не удалось открыть TCP-подключение к серверу VPN.") from error
             port, proxy, bridge = start_xray(profile, endpoint, stack)
-            upstream_ip = probe(port)
+            check = check_connection(port)
+            upstream_ip = check.address
             if upstream_ip is None:
-                raise HTTPSProbeError("TCP до сервера работает, но через VLESS + REALITY не ответили оба проверочных HTTPS-адреса.")
+                if check.received_http:
+                    raise HTTPSProbeError("Через VLESS + REALITY получен ответ HTTPS, но проверочные адреса не вернули выходной IPv4.")
+                raise HTTPSProbeError("TCP до сервера работает, но через VLESS + REALITY не получен ни один ответ HTTPS.")
         if deferred_sites and not direct_sites:
             direct_sites.extend(resolve_direct_sites(deferred_sites, port))
         say("progress", "Запускаем системный туннель…")
@@ -816,7 +842,7 @@ def run_connection(profile, protect, direct_sites, direct_ru, app_pid, previous_
                 say("progress", "Проверяем выход в интернет через VPN…")
                 observed_ip = None
                 for _ in range(2):
-                    check = check_connection(port if vpn_sites else None)
+                    check = check_connection(port if vpn_sites else None, expected_ip=upstream_ip)
                     current_ip = check.address
                     if current_ip == upstream_ip:
                         break
@@ -824,7 +850,7 @@ def run_connection(profile, protect, direct_sites, direct_ru, app_pid, previous_
                         observed_ip = current_ip
                 else:
                     if observed_ip is None:
-                        raise HTTPSProbeError("Туннель запустился, но через VPN не ответили оба проверочных HTTPS-адреса.")
+                        raise HTTPSProbeError("Системный туннель запустился, но проверка не получила выходной IPv4 через VPN.")
                     raise ProfileError("Системный маршрут не совпал с выходом через VPS. Отключите другие VPN и повторите.")
                 say("connected", str(upstream_ip), entryIP=str(endpoint), detail=check.connection_detail())
                 reason = monitor_connection(service, proxy, bridge, app_pid, upstream_ip, port if vpn_sites else None)
