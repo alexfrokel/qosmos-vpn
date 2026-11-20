@@ -16,3 +16,4 @@ fi
 /usr/bin/install -o root -g wheel -m 0644 /dev/null "/Library/Application Support/QosmosVPN/tunnel-split-v9"
 /usr/bin/install -o root -g wheel -m 0644 /dev/null "/Library/Application Support/QosmosVPN/tunnel-split-ru-v10"
 /usr/bin/install -o root -g wheel -m 0644 /dev/null "/Library/Application Support/QosmosVPN/tunnel-split-ru-v11"
+/usr/bin/install -o root -g wheel -m 0644 /dev/null "/Library/Application Support/QosmosVPN/tunnel-split-ru-v12"
