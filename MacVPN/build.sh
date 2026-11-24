@@ -4,9 +4,15 @@ cd -- "$(dirname -- "$0")"
 source_dir="$PWD"
 engines="${QOSMOS_ENGINE_DIR:-$source_dir/../.vless-local}"
 build="${QOSMOS_BUILD_DIR:-$source_dir/build}"
-module_cache="$source_dir/build/module-cache"
+module_cache="$build/module-cache"
 swift_target=arm64-apple-macos13.0
-app="$build/Qosmos VPN.app"
+variant="${QOSMOS_APP_VARIANT:-qosmos}"
+case "$variant" in
+    qosmos) app_name="Qosmos VPN"; executable="VLESSVPN" ;;
+    vezde) app_name="Vezde VPN"; executable="VezdeVPN" ;;
+    *) printf 'Unknown application variant: %s\n' "$variant" >&2; exit 1 ;;
+esac
+app="$build/$app_name.app"
 resources="$app/Contents/Resources"
 iconset="$build/AppIcon.iconset"
 mkdir -p "$app/Contents/MacOS" "$resources/en.lproj" "$module_cache" "$iconset"
@@ -16,8 +22,26 @@ for file in server_setup.py server-setup-entry.sh server-setup-exit.sh update_in
     install -m 0644 "$source_dir/$file" "$resources/$file"
 done
 install -m 0644 "$source_dir/Info.plist" "$app/Contents/Info.plist"
-if [[ -n "${QOSMOS_UPDATE_SOURCE:-}" ]]; then
+if [[ "$variant" = vezde ]]; then
+    plist="$app/Contents/Info.plist"
+    plutil -replace CFBundleDisplayName -string "$app_name" "$plist"
+    plutil -replace CFBundleName -string "$app_name" "$plist"
+    plutil -replace CFBundleExecutable -string "$executable" "$plist"
+    plutil -replace CFBundleIdentifier -string local.vezdevpn.mac "$plist"
+    read -r app_version build_number < "$source_dir/../VezdeVPN/version"
+    [[ "$app_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ && "$build_number" =~ ^[1-9][0-9]*$ ]]
+    plutil -replace CFBundleShortVersionString -string "$app_version" "$plist"
+    plutil -replace CFBundleVersion -string "$build_number" "$plist"
+    if [[ -n "${QOSMOS_UPDATE_SOURCE:-}" ]]; then
+        plutil -replace QosmosUpdateSource -string "$QOSMOS_UPDATE_SOURCE" "$plist"
+    else
+        plutil -remove QosmosUpdateSource "$plist"
+    fi
+elif [[ -n "${QOSMOS_UPDATE_SOURCE:-}" ]]; then
     plutil -replace QosmosUpdateSource -string "$QOSMOS_UPDATE_SOURCE" "$app/Contents/Info.plist"
+fi
+if [[ -n "${QOSMOS_VOX_API_URL:-}" ]]; then
+    plutil -insert QosmosVoxAPIURL -string "$QOSMOS_VOX_API_URL" "$app/Contents/Info.plist"
 fi
 if [[ -n "${QOSMOS_DIRECT_SITES:-}" ]]; then
     plutil -insert QosmosDirectSites -string "$QOSMOS_DIRECT_SITES" "$app/Contents/Info.plist"
@@ -32,12 +56,12 @@ for license in xray-LICENSE sing-box-LICENSE; do
         install -m 0644 "$engines/$license" "$resources/$license"
     fi
 done
-xcrun swift -module-cache-path "$module_cache" "$source_dir/Icon.swift" "$build/qosmos-icon.png"
+xcrun swift -module-cache-path "$module_cache" "$source_dir/Icon.swift" "$build/app-icon.png" "$variant"
 for size in 16 32 128 256 512; do
     double=$((size * 2))
     base=$(printf 'icon_%sx%s' "$size" "$size")
-    sips -z "$size" "$size" "$build/qosmos-icon.png" --out "$iconset/$base.png" >/dev/null
-    sips -z "$double" "$double" "$build/qosmos-icon.png" --out "$iconset/$base@2x.png" >/dev/null
+    sips -z "$size" "$size" "$build/app-icon.png" --out "$iconset/$base.png" >/dev/null
+    sips -z "$double" "$double" "$build/app-icon.png" --out "$iconset/$base@2x.png" >/dev/null
 done
 iconutil -c icns "$iconset" -o "$resources/AppIcon.icns"
 package_root=$(mktemp -d "$build/tunnel-package.XXXXXXXX")
@@ -57,7 +81,8 @@ COPYFILE_DISABLE=1 pkgbuild --root "$package_root" --scripts "$source_dir/tunnel
     "$resources/Qosmos Tunnel.pkg"
 xcrun swiftc -target "$swift_target" -parse-as-library -O -module-cache-path "$module_cache" \
     "$source_dir/VlessVPN.swift" "$source_dir/AppSettings.swift" "$source_dir/ServerSetup.swift" \
-    -o "$app/Contents/MacOS/VLESSVPN"
+    "$source_dir/VoxSubscription.swift" "$source_dir/VezdeDashboard.swift" \
+    -o "$app/Contents/MacOS/$executable"
 codesign --force --sign - "$app/Contents/Resources/xray" "$app/Contents/Resources/sing-box"
 if [[ -n "${QOSMOS_PYTHON_DIR:-}" ]]; then
     test -x "$QOSMOS_PYTHON_DIR/bin/python3"

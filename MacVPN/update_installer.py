@@ -13,13 +13,26 @@ import time
 import zipfile
 
 
-APP_NAME = "Qosmos VPN.app"
+APPLICATIONS = {
+    "local.vlessvpn.mac": "Qosmos VPN.app",
+    "local.vezdevpn.mac": "Vezde VPN.app",
+}
 MAX_ARCHIVE_SIZE = 256 * 1024**2
 MAX_EXTRACTED_SIZE = 768 * 1024**2
 RENAME_SWAP = 2
 
 
+def installed_app(installed):
+    with (installed / "Contents/Info.plist").open("rb") as file:
+        info = plistlib.load(file)
+    name = APPLICATIONS.get(info.get("CFBundleIdentifier"))
+    if name is None:
+        raise ValueError("Unsupported application")
+    return name, info
+
+
 def prepare(staging, installed, version, expected_digest):
+    app_name, current = installed_app(installed)
     archive = staging / "update.zip"
     digest = hashlib.sha256()
     with archive.open("rb") as source:
@@ -37,15 +50,13 @@ def prepare(staging, installed, version, expected_digest):
         for member in members:
             parts = member.filename.rstrip("/").split("/")
             mode = stat.S_IFMT(member.external_attr >> 16)
-            if (parts[0] not in (APP_NAME, "__MACOSX") or any(part in ("", ".", "..") for part in parts)
+            if (parts[0] not in (app_name, "__MACOSX") or any(part in ("", ".", "..") for part in parts)
                     or "\\" in member.filename or mode not in (0, stat.S_IFDIR, stat.S_IFREG)):
                 raise ValueError("Unexpected entry in the release archive")
     subprocess.run(["/usr/bin/ditto", "-x", "-k", archive, staging], check=True)
     archive.unlink()
 
-    candidate = staging / APP_NAME
-    with (installed / "Contents/Info.plist").open("rb") as old_info:
-        current = plistlib.load(old_info)
+    candidate = staging / app_name
     with (candidate / "Contents/Info.plist").open("rb") as new_info:
         update = plistlib.load(new_info)
     if (update.get("CFBundleIdentifier") != current["CFBundleIdentifier"]
@@ -63,7 +74,7 @@ def wait_for_exit(pid):
         except ProcessLookupError:
             return
         time.sleep(0.2)
-    raise TimeoutError("Qosmos VPN is still running")
+    raise TimeoutError("The VPN application is still running")
 
 
 def swap(first, second):
@@ -82,7 +93,8 @@ def launch(app, flags):
 def install(staging, installed, pid, resume):
     wait_for_exit(pid)
     flags = ["--resume-after-update"] if resume else []
-    candidate = staging / APP_NAME
+    app_name, _ = installed_app(installed)
+    candidate = staging / app_name
     swapped = False
     try:
         swap(installed, candidate)

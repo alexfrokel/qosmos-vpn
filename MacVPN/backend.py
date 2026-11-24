@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import errno
 import fcntl
 import ipaddress
 import json
@@ -23,6 +24,9 @@ from typing import NamedTuple, Optional
 from urllib.parse import parse_qs, unquote, urlsplit
 
 RESOURCES = Path(__file__).resolve().parent
+VEZDE = os.environ.get("QOSMOS_APP_VARIANT") == "vezde"
+SHARED_STORAGE = Path.home() / "Library/Application Support/VLESS VPN"
+APP_STORAGE = Path.home() / "Library/Application Support/Vezde VPN" if VEZDE else SHARED_STORAGE
 XRAY = RESOURCES / "xray"
 SING_BOX = RESOURCES / "sing-box"
 CHECK_URL = "https://api.ipify.org/"
@@ -56,7 +60,11 @@ class ProfileError(ValueError):
     pass
 
 
-class HTTPSProbeError(ProfileError):
+class TransientConnectionError(ProfileError):
+    endpoint = None
+
+
+class HTTPSProbeError(TransientConnectionError):
     pass
 
 
@@ -297,7 +305,7 @@ def port_ready(port, proxy, attempts=40):
                 return
         except OSError:
             time.sleep(0.05)
-    raise ProfileError("Xray не смог открыть локальный прокси.")
+    raise TransientConnectionError("Xray не смог открыть локальный прокси.")
 
 
 def check_https_address(url, proxy_args):
@@ -492,14 +500,14 @@ def start_tunnel(endpoint, port, server_port, protect, direct_sites, direct_ru, 
         if response != b"\x01":
             connection.close()
             if response == b"\x03":
-                raise ProfileError("Не удалось направить DNS macOS в туннель VPN.")
+                raise TransientConnectionError("Не удалось направить DNS macOS в туннель VPN.")
             raise ProfileError("Не удалось настроить сайты напрямую. Проверьте адреса и подключение по Wi-Fi или Ethernet.")
         connection.settimeout(None)
         return connection
     except OSError as error:
         message = ("Не удалось запустить туннель с Kill Switch."
                    if protect else "Системная служба Qosmos VPN не смогла запустить туннель.")
-        raise ProfileError(message) from error
+        raise TransientConnectionError(message) from error
 
 
 def terminal_session():
@@ -616,7 +624,8 @@ def resolve_direct_sites(hosts, proxy_port=None):
     return sites
 
 
-def connect(profile, allow_install, protect, direct_sites, direct_ru=False, previous_entry_ip=None, vpn_sites=None):
+def connect(profile, allow_install, protect, direct_sites, direct_ru=False, previous_entry_ip=None, vpn_sites=None,
+            country=None, alternatives=()):
     only_hosts = ()
     if vpn_sites is not None:
         only_hosts = parse_site_hosts(vpn_sites, "Укажите до 20 доменов для VPN через запятую.")
@@ -625,9 +634,9 @@ def connect(profile, allow_install, protect, direct_sites, direct_ru=False, prev
         direct_sites = ""
         direct_ru = False
     direct_hosts = parse_site_hosts(direct_sites, "Укажите до 20 доменов сайтов напрямую, через запятую.")
-    storage = Path.home() / "Library/Application Support/VLESS VPN"
-    storage.mkdir(mode=0o700, parents=True, exist_ok=True)
-    with (storage / "connection.lock").open("a") as lock:
+    SHARED_STORAGE.mkdir(mode=0o700, parents=True, exist_ok=True)
+    APP_STORAGE.mkdir(mode=0o700, parents=True, exist_ok=True)
+    with (SHARED_STORAGE / "connection.lock").open("a") as lock:
         try:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as error:
@@ -645,7 +654,7 @@ def connect(profile, allow_install, protect, direct_sites, direct_ru=False, prev
                     endpoint = ipaddress.ip_address(previous_entry_ip)
                 except ValueError:
                     pass
-            site_cache = storage / "direct-sites-cache.json"
+            site_cache = APP_STORAGE / "direct-sites-cache.json"
             sites = [] if only_hosts else None
             deferred_sites = []
             if blocked and sites is None:
@@ -667,19 +676,35 @@ def connect(profile, allow_install, protect, direct_sites, direct_ru=False, prev
                         pass
             app_pid = os.getppid()
             has_connected = False
-            retried_startup = False
+            startup_delays = iter((1, 2) if VEZDE else (2,))
+            startup_error = TransientConnectionError if VEZDE else HTTPSProbeError
+            fallbacks = iter(alternatives if VEZDE and not blocked else ())
             retry_delay = 0
             while os.getppid() == app_pid:
                 try:
                     endpoint = run_connection(profile, protect, sites, direct_ru, app_pid, endpoint,
-                                              only_hosts, deferred_sites)
+                                              only_hosts, deferred_sites, country=country)
                 except (ProfileError, OSError, subprocess.SubprocessError) as error:
                     if not has_connected:
-                        if retried_startup or not isinstance(error, HTTPSProbeError):
+                        if not isinstance(error, startup_error):
                             raise
-                        retried_startup = True
-                        retry_delay = 2
-                        say("progress", "Повторяем проверку HTTPS через VPN…")
+                        retry_delay = next(startup_delays, None)
+                        if retry_delay is None:
+                            raise
+                        if VEZDE:
+                            if error.endpoint is not None:
+                                # Startup may have armed Kill Switch for this endpoint.
+                                fallbacks = iter(())
+                                endpoint = error.endpoint
+                            fallback = next(fallbacks, None)
+                            if fallback is not None:
+                                profile, country = fallback
+                                endpoint = None
+                                say("progress", "Проверяем другую страну…")
+                            else:
+                                say("progress", "Повторяем подключение…")
+                        else:
+                            say("progress", "Повторяем проверку HTTPS через VPN…")
                     else:
                         retry_delay = min(max(retry_delay * 2, 5), 30)
                         say("reconnecting", "Восстанавливаем соединение с VPN…")
@@ -764,7 +789,7 @@ def start_ssh(profile, stack):
 
 def start_cloudflare(profile, stack, previous_endpoint=None):
     hostname = profile["cloudflareHost"].lower()
-    cache = Path.home() / "Library/Application Support/VLESS VPN" / f"cloudflare-edge-{hostname}"
+    cache = APP_STORAGE / f"cloudflare-edge-{hostname}"
     try:
         preferred = [str(ipaddress.IPv4Address(cache.read_text().strip()))]
     except (OSError, ValueError):
@@ -829,7 +854,7 @@ def monitor_connection(service, proxy, bridge, app_pid, upstream_ip, probe_port=
 
 
 def run_connection(profile, protect, direct_sites, direct_ru, app_pid, previous_endpoint=None,
-                   vpn_sites=(), deferred_sites=()):
+                   vpn_sites=(), deferred_sites=(), country=None):
     if tunnel_exists():
         raise ProfileError("Этот системный туннель уже запущен. Отключите его в приложении перед новым подключением.")
     cloudflare_host = profile.get("cloudflareHost")
@@ -845,13 +870,20 @@ def run_connection(profile, protect, direct_sites, direct_ru, app_pid, previous_
                 with socket.create_connection((str(previous_endpoint or profile["host"]), server_port), timeout=6) as server:
                     endpoint = ipaddress.ip_address(server.getpeername()[0].split("%")[0])
             except socket.gaierror as error:
-                raise ProfileError("DNS не смог определить адрес сервера VPN.") from error
+                failure = TransientConnectionError if error.errno == socket.EAI_AGAIN else ProfileError
+                raise failure("DNS не смог определить адрес сервера VPN.") from error
             except ConnectionRefusedError as error:
-                raise ProfileError("Сервер отклонил TCP-подключение. Проверьте порт и службу VPN на сервере.") from error
+                raise TransientConnectionError(
+                    "Сервер отклонил TCP-подключение. Проверьте порт и службу VPN на сервере."
+                ) from error
             except TimeoutError as error:
-                raise ProfileError("Сервер VPN не ответил на TCP-подключение. Проверьте адрес и порт профиля.") from error
+                raise TransientConnectionError(
+                    "Сервер VPN не ответил на TCP-подключение. Проверьте адрес и порт профиля."
+                ) from error
             except OSError as error:
-                raise ProfileError("Не удалось открыть TCP-подключение к серверу VPN.") from error
+                retryable = error.errno in (errno.ECONNRESET, errno.EHOSTUNREACH, errno.ENETUNREACH, errno.ENETDOWN)
+                failure = TransientConnectionError if retryable else ProfileError
+                raise failure("Не удалось открыть TCP-подключение к серверу VPN.") from error
             port, proxy, bridge = start_xray(profile, endpoint, stack)
             check = check_connection(port)
             upstream_ip = check.address
@@ -870,9 +902,9 @@ def run_connection(profile, protect, direct_sites, direct_ru, app_pid, previous_
                     if tunnel_exists():
                         break
                     if select.select([service], [], [], 0.15)[0]:
-                        raise ProfileError("Системный туннель остановился при запуске.")
+                        raise TransientConnectionError("Системный туннель остановился при запуске.")
                 else:
-                    raise ProfileError("macOS не подняла сетевой интерфейс VPN.")
+                    raise TransientConnectionError("macOS не подняла сетевой интерфейс VPN.")
                 say("progress", "Проверяем выход в интернет через VPN…")
                 observed_ip = None
                 for _ in range(2):
@@ -886,10 +918,15 @@ def run_connection(profile, protect, direct_sites, direct_ru, app_pid, previous_
                     if observed_ip is None:
                         raise HTTPSProbeError("Системный туннель запустился, но проверка не получила выходной IPv4 через VPN.")
                     raise ProfileError("Системный маршрут не совпал с выходом через VPS. Отключите другие VPN и повторите.")
-                say("connected", str(upstream_ip), entryIP=str(endpoint), detail=check.connection_detail())
+                say("connected", str(upstream_ip), entryIP=str(endpoint), detail=check.connection_detail(),
+                    country=country)
                 reason = monitor_connection(service, proxy, bridge, app_pid, upstream_ip, port if vpn_sites else None)
                 if os.getppid() == app_pid:
                     say("reconnecting", reason or "Восстанавливаем соединение с VPN…")
+        except TransientConnectionError as error:
+            # Kill Switch may already allow only this endpoint during startup retries.
+            error.endpoint = endpoint
+            raise
         finally:
             stop_proxy(proxy)
             for _ in range(40):
@@ -940,16 +977,24 @@ if __name__ == "__main__":
             print(json.dumps(parse_profiles(sys.stdin.read(), sys.argv[2]), ensure_ascii=False))
         elif mode in ("connect", "connect-auto"):
             request = json.loads(sys.stdin.read())
+            alternatives = [
+                (validate(candidate["profile"]), candidate["country"])
+                for candidate in request.get("alternatives", [])
+            ] if VEZDE else ()
             connect(validate(request.get("profile", request)), allow_install=mode == "connect",
                     protect="--no-kill-switch" not in sys.argv[2:], direct_sites=request.get("directSites", ""),
                     direct_ru=request.get("directRuSites") is True, previous_entry_ip=request.get("previousEntryIP"),
-                    vpn_sites=request.get("vpnSites"))
+                    vpn_sites=request.get("vpnSites"), country=request.get("country"), alternatives=alternatives)
         elif mode == "terminal-status":
-            if terminal_session() is not None:
+            if VEZDE and tunnel_exists():
+                print("in-use")
+            elif terminal_session() is not None:
                 print("active")
             else:
                 print("blocked" if protection_blocked() else "inactive")
         elif mode == "release-protection":
+            if VEZDE and tunnel_exists():
+                raise ProfileError("Системный туннель занят другим VPN-подключением.")
             release_protection()
             say("disconnected", "Доступ в интернет восстановлен.")
         elif mode == "public-ip":

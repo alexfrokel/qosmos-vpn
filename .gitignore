@@ -1,5 +1,6 @@
 /.vless-local/
 /MacVPN/build/
+/VezdeVPN/build/
 /dist/
 .DS_Store
 __pycache__/

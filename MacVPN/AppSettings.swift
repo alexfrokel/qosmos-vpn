@@ -16,6 +16,15 @@ enum SplitMode: String, CaseIterable {
 }
 
 enum AppBuild {
+    static let isVezde = Bundle.main.bundleIdentifier == "local.vezdevpn.mac"
+    static let name = isVezde ? "Vezde VPN" : "Qosmos VPN"
+    static let storageName = isVezde ? "Vezde VPN" : "VLESS VPN"
+    static let accent = isVezde ? Color(red: 0.62, green: 0.92, blue: 0.80)
+        : Color(red: 1.0, green: 0.68, blue: 0.46)
+    static let canvas = isVezde ? Color(red: 0.047, green: 0.075, blue: 0.096)
+        : Color(red: 0.051, green: 0.055, blue: 0.066)
+    static let surface = isVezde ? Color(red: 0.075, green: 0.115, blue: 0.140)
+        : Color(red: 0.091, green: 0.096, blue: 0.110)
     static let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0"
     static let updateSource = Bundle.main.object(forInfoDictionaryKey: "QosmosUpdateSource") as? String ?? ""
     static let directSites = Bundle.main.object(forInfoDictionaryKey: "QosmosDirectSites") as? String ?? ""
@@ -89,7 +98,7 @@ final class AppPreferences: ObservableObject {
     init(defaults: UserDefaults = .standard, directory: URL? = nil) {
         self.defaults = defaults
         self.directory = directory ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("VLESS VPN", isDirectory: true)
+            .appendingPathComponent(AppBuild.storageName, isDirectory: true)
         autoConnect = defaults.bool(forKey: "autoConnect")
         killSwitch = defaults.object(forKey: "killSwitch") as? Bool ?? true
         directSites = defaults.string(forKey: "directSites") ?? AppBuild.directSites
@@ -98,7 +107,8 @@ final class AppPreferences: ObservableObject {
         directRuSites = defaults.bool(forKey: "directRuSites")
         launchMinimized = defaults.bool(forKey: "launchMinimized")
         autoUpdates = defaults.object(forKey: "autoUpdates") as? Bool ?? true
-        updateSource = defaults.string(forKey: "updateSource").flatMap(Self.httpsURL)?.absoluteString ?? AppBuild.updateSource
+        let savedUpdateSource = defaults.string(forKey: "updateSource").flatMap(Self.httpsURL)?.absoluteString
+        updateSource = AppBuild.isVezde ? AppBuild.updateSource : savedUpdateSource ?? AppBuild.updateSource
         language = AppLanguage(rawValue: defaults.string(forKey: "uiLanguage") ?? "") ?? .russian
         logging = defaults.bool(forKey: "logging")
         refreshLoginStatus()
@@ -141,7 +151,7 @@ final class AppPreferences: ObservableObject {
         do {
             try writeLog(Data("\(stamp) \(event)\n".utf8), append: true)
         } catch {
-            NSLog("Qosmos VPN could not write its local event log.")
+            NSLog("%@ could not write its local event log.", AppBuild.name)
         }
     }
 
@@ -241,7 +251,8 @@ final class AppPreferences: ObservableObject {
         let target = Bundle.main.bundleURL.resolvingSymlinksInPath()
         let parent = target.deletingLastPathComponent()
         guard FileManager.default.isWritableFile(atPath: parent.path) else {
-            updateMessage = "Переместите Qosmos VPN в папку, доступную для записи."
+            updateMessage = AppBuild.isVezde ? "Переместите Vezde VPN в папку, доступную для записи."
+                : "Переместите Qosmos VPN в папку, доступную для записи."
             return
         }
         installingUpdate = true
@@ -384,9 +395,9 @@ struct QosmosSettingsView: View {
         }
         .padding(24)
         .frame(width: 430, height: 615)
-        .tint(Color(red: 1, green: 0.68, blue: 0.46))
+        .tint(AppBuild.accent)
         .foregroundStyle(Color(red: 0.96, green: 0.95, blue: 0.93))
-        .background(Color(red: 0.051, green: 0.055, blue: 0.066))
+        .background(AppBuild.canvas)
         .preferredColorScheme(.dark)
         .alert(preferences.text("Сбросить настройки и удалить профили?"), isPresented: $confirmReset) {
             Button(preferences.text("Сбросить"), role: .destructive) { model.resetData() }
@@ -426,7 +437,7 @@ struct QosmosSettingsView: View {
                     .labelsHidden().toggleStyle(.switch).disabled(!preferences.loginRegistered)
             }
             Divider()
-            row("Язык", "Язык интерфейса Qosmos VPN") {
+            row("Язык", AppBuild.isVezde ? "Язык интерфейса" : "Язык интерфейса Qosmos VPN") {
                 Picker(preferences.text("Язык"), selection: $preferences.language) {
                     Text(verbatim: "Русский").tag(AppLanguage.russian)
                     Text(verbatim: "English").tag(AppLanguage.english)
@@ -509,12 +520,14 @@ struct QosmosSettingsView: View {
                 Toggle(preferences.text("Проверять обновления автоматически"), isOn: $preferences.autoUpdates)
                     .labelsHidden().toggleStyle(.switch).disabled(!preferences.hasUpdateSource)
             }
-            TextField(preferences.text("HTTPS-адрес файла обновлений"), text: $preferences.updateSource)
-                .textFieldStyle(.roundedBorder)
-                .disabled(preferences.installingUpdate)
-            if !preferences.hasUpdateSource {
-                Text(preferences.text("Укажите HTTPS-адрес источника обновлений."))
-                    .font(.caption).foregroundStyle(.secondary)
+            if !AppBuild.isVezde {
+                TextField(preferences.text("HTTPS-адрес файла обновлений"), text: $preferences.updateSource)
+                    .textFieldStyle(.roundedBorder)
+                    .disabled(preferences.installingUpdate)
+                if !preferences.hasUpdateSource {
+                    Text(preferences.text("Укажите HTTPS-адрес источника обновлений."))
+                        .font(.caption).foregroundStyle(.secondary)
+                }
             }
             HStack {
                 Button(preferences.text(preferences.checkingUpdate ? "Проверяем…" : "Проверить сейчас")) {
@@ -526,11 +539,15 @@ struct QosmosSettingsView: View {
                         Button("\(preferences.text("Обновить")) · \(release.version)") {
                             preferences.installUpdate(restart: model.restartForUpdate)
                         }
-                        .disabled(preferences.installingUpdate)
+                        .disabled(preferences.installingUpdate || !model.canInstallUpdate)
                     } else if let url = URL(string: release.url) {
                         Link(preferences.text("Скачать"), destination: url)
                     }
                 }
+            }
+            if AppBuild.isVezde && preferences.availableUpdate?.checksum != nil && !model.canInstallUpdate {
+                Text(preferences.text("Отключите Vezde VPN, чтобы установить обновление."))
+                    .font(.caption).foregroundStyle(.secondary)
             }
             if preferences.installingUpdate, let percent = preferences.downloadPercent {
                 HStack(spacing: 10) {
