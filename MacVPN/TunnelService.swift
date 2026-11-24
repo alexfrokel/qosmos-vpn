@@ -173,7 +173,9 @@ private func send(_ value: UInt8, to peer: Int32) -> Bool {
 }
 
 private func serve(_ peer: Int32, uid: uid_t) throws {
-    let opcode = try readBytes(1, from: peer)[0]
+    let command = try readBytes(1, from: peer)[0]
+    let udp = [8, 9, 10, 12].contains(command)
+    let opcode = udp ? command - 5 : command
     switch opcode {
     case 1:
         _ = try send(KillSwitch.isBlocking() ? 2 : 1, to: peer)
@@ -226,7 +228,7 @@ private func serve(_ peer: Int32, uid: uid_t) throws {
         throw error
     }
     let keepProtection = try request.protected || KillSwitch.isBlocking()
-    let blockedRules = KillSwitch.rules(endpoint: request.endpoint, port: request.serverPort, uid: uid, tunnel: nil)
+    let blockedRules = KillSwitch.rules(endpoint: request.endpoint, port: request.serverPort, uid: uid, tunnel: nil, udp: udp)
     guard tunnelInterface() == nil else { throw ServiceError.invalidRequest }
     var template = Array("/private/var/run/qosmos-vpn.XXXXXXXX".utf8CString)
     guard mkdtemp(&template) != nil else { throw ServiceError.cannotCreateConfig }
@@ -274,7 +276,7 @@ private func serve(_ peer: Int32, uid: uid_t) throws {
         }
     }
     if keepProtection {
-        try KillSwitch.replace(KillSwitch.rules(endpoint: request.endpoint, port: request.serverPort, uid: uid, tunnel: device, split: split))
+        try KillSwitch.replace(KillSwitch.rules(endpoint: request.endpoint, port: request.serverPort, uid: uid, tunnel: device, split: split, udp: udp))
     }
     let dns: SCDynamicStore
     do {

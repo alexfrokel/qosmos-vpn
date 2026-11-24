@@ -8,7 +8,8 @@ struct KillSwitch {
         try !pf(["-a", anchor, "-sr"]).trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
-    static func rules(endpoint: String, port: Int, uid: uid_t, tunnel: String?, split: SplitTunnel? = nil) -> String {
+    static func rules(endpoint: String, port: Int, uid: uid_t, tunnel: String?, split: SplitTunnel? = nil,
+                      udp: Bool = false) -> String {
         let family = endpoint.contains(":") ? "inet6" : "inet"
         var lines = ["pass quick on lo0 all no state"]
         if let tunnel { lines.append("pass quick on \(tunnel) all no state") }
@@ -24,8 +25,10 @@ struct KillSwitch {
                 lines.append("\(rule) to ! <qosmos_non_public_v4> \(web)")
             }
         }
+        let transport = udp ? "udp" : "tcp"
+        let flags = udp ? "" : " flags any"
         lines += [
-            "pass out quick \(family) proto tcp from any to \(endpoint) port = \(port) flags any user \(uid) keep state (if-bound)",
+            "pass out quick \(family) proto \(transport) from any to \(endpoint) port = \(port)\(flags) user \(uid) keep state (if-bound)",
             "pass out quick inet proto udp from any port 68 to any port 67 no state",
             "pass in quick inet proto udp from any port 67 to any port 68 no state",
             "pass quick inet6 proto ipv6-icmp all icmp6-type { 133, 134, 135, 136 } no state",

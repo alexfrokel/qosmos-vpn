@@ -235,3 +235,6 @@
 "Ожидает подключения" = "Awaiting first connection";
 "Продлить подписку" = "Renew subscription";
 "Оплата пока недоступна" = "Payment is currently unavailable";
+"Активный протокол" = "Active protocol";
+"Выбрать протокол" = "Choose protocol";
+"Отключите VPN, чтобы сменить протокол." = "Disconnect the VPN to change the protocol.";

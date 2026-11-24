@@ -20,6 +20,7 @@ from urllib.request import HTTPRedirectHandler, Request, build_opener
 VOX_API = "https://api.vox-vpn.com/partner/v1"
 MAX_RESPONSE = 1_048_576
 DEMO_DEVICE_LIMIT = 2
+PROTOCOLS = ("vless", "wireguard", "amneziawg")
 
 
 class GatewayError(Exception):
@@ -35,8 +36,9 @@ class NoRedirect(HTTPRedirectHandler):
 
 
 class Vox:
-    def __init__(self, key):
+    def __init__(self, key, timeout=10):
         self.key = key
+        self.timeout = timeout
         self.client = build_opener(NoRedirect())
 
     def request(self, path, payload=None):
@@ -45,7 +47,7 @@ class Vox:
             headers["Content-Type"] = "application/json"
         data = json.dumps(payload).encode() if payload is not None else None
         try:
-            with self.client.open(Request(VOX_API + path, data, headers), timeout=10) as response:
+            with self.client.open(Request(VOX_API + path, data, headers), timeout=self.timeout) as response:
                 body = response.read(MAX_RESPONSE + 1)
                 if len(body) > MAX_RESPONSE:
                     raise GatewayError(502, "vox_unavailable")
@@ -135,14 +137,17 @@ class Gateway:
             raise GatewayError(401, "invalid_activation")
         return account
 
-    def locations(self, country=None):
-        filters = {"protocol": "vless"}
+    def locations(self, country=None, protocol="vless"):
+        filters = {}
+        if protocol:
+            filters["protocol"] = protocol
         if country:
             filters["country"] = country
-        locations = self.vox.request("/locations?" + urlencode(filters))["locations"]
+        query = "?" + urlencode(filters) if filters else ""
+        locations = self.vox.request("/locations" + query)["locations"]
         return [
             location for location in locations
-            if "vless" in location["protocols"]
+            if (protocol is None or protocol in location["protocols"])
             and re.fullmatch(r"[A-Z]{2}", location["country"])
             and re.fullmatch(r"[a-z0-9-]{1,80}", location["id"])
             and (country is None or country == location["country"])
@@ -150,8 +155,19 @@ class Gateway:
 
     def countries(self):
         self.vox.require_demo()
-        countries = {loc["country"]: loc["country_name"] for loc in self.locations()}
-        return {"countries": [{"code": code, "name": name} for code, name in sorted(countries.items())]}
+        catalog = {}
+        for location in self.locations(protocol=None):
+            code = location["country"]
+            name, protocols = catalog.setdefault(code, (location["country_name"], set()))
+            protocols.update(protocol for protocol in PROTOCOLS if protocol in location["protocols"])
+        countries = [
+            {"code": code, "name": name, "protocols": [p for p in PROTOCOLS if p in protocols]}
+            for code, (name, protocols) in sorted(catalog.items()) if protocols
+        ]
+        return {
+            "countries": [country for country in countries if "vless" in country["protocols"]],
+            "protocol_countries": countries,
+        }
 
     def subscription(self, account):
         self.vox.require_demo()
@@ -194,13 +210,14 @@ class Gateway:
         try:
             country = data["country"]
             device_id = str(uuid.UUID(data["device_id"]))
-            if not re.fullmatch(r"[A-Z]{2}", country):
+            protocol = data.get("protocol", "vless")
+            if protocol not in PROTOCOLS or not re.fullmatch(r"[A-Z]{2}", country):
                 raise ValueError
         except (AttributeError, KeyError, TypeError, ValueError) as error:
             raise GatewayError(400, "invalid_request") from error
 
         self.vox.require_demo()
-        locations = sorted(self.locations(country), key=lambda loc: loc["id"])
+        locations = sorted(self.locations(country, protocol), key=lambda loc: loc["id"])
         if not locations:
             raise GatewayError(404, "country_unavailable")
         external_id, provisioned = account
@@ -211,13 +228,17 @@ class Gateway:
             with closing(self.open_database()) as db, db:
                 db.execute("UPDATE accounts SET provisioned = 1 WHERE external_id = ?", (external_id,))
 
-        query = urlencode({"protocol": "vless", "location": locations[0]["id"],
+        query = urlencode({"protocol": protocol, "location": locations[0]["id"],
                            "device": self.slot(external_id, device_id)})
         result = self.vox.request(f"/users/{quote(external_id, safe='')}/config?{query}")
-        link = result["config"]
-        if not isinstance(link, str) or not link.startswith("vless://") or len(link) > 16384:
+        config = result["config"]
+        if result.get("protocol") != protocol or not isinstance(config, str) or len(config) > 16384:
             raise GatewayError(502, "invalid_profile")
-        return {"link": link}
+        if protocol == "vless" and config.startswith("vless://"):
+            return {"protocol": protocol, "link": config}
+        if protocol != "vless" and config.lstrip().startswith("[Interface]"):
+            return {"protocol": protocol, "config": config}
+        raise GatewayError(502, "invalid_profile")
 
 
 class Handler(BaseHTTPRequestHandler):

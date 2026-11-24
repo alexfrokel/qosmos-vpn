@@ -66,6 +66,7 @@ struct BackendEvent: Decodable {
     let entryIP: String?
     let detail: String?
     let country: String?
+    let voxProtocol: VoxProtocol?
 }
 
 struct AppError: LocalizedError {
@@ -101,6 +102,8 @@ final class VPNModel: ObservableObject {
     @Published private(set) var voxActivated = false
     @Published private(set) var voxCountries: [VoxCountry] = []
     @Published private(set) var voxCountry: String?
+    @Published private(set) var voxProtocol: VoxProtocol = .vless
+    @Published private(set) var connectedVoxProtocol: VoxProtocol?
     @Published private(set) var voxBusy = false
     @Published private(set) var voxUsage: VoxUsage?
     @Published private(set) var voxUsageUnavailable = false
@@ -113,7 +116,7 @@ final class VPNModel: ObservableObject {
     private var autoConnectPending = false
     private var resumeAfterUpdate = false
     private var reconnectWithSettingsPending = false
-    private var reconnectWithSettingsVoxProfile: Profile?
+    private var reconnectWithSettingsVoxProfile: ConnectionProfile?
     private let vox: VoxSubscription?
     private var voxConnectionTask: Task<Void, Never>?
     private var voxUsageTask: Task<Void, Never>?
@@ -137,6 +140,9 @@ final class VPNModel: ObservableObject {
         voxActivated = hasVoxToken
         voxSelected = hasVoxToken && defaults.bool(forKey: "voxSelected")
         voxCountry = defaults.string(forKey: "voxCountry")
+        if AppBuild.isVezde {
+            voxProtocol = defaults.string(forKey: "voxProtocol").flatMap(VoxProtocol.init(rawValue:)) ?? .vless
+        }
         let directory = directory ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent(AppBuild.storageName, isDirectory: true)
         storage = directory.appendingPathComponent("profiles.json")
@@ -158,7 +164,31 @@ final class VPNModel: ObservableObject {
     }
 
     var voxAvailable: Bool { vox != nil }
-    private var canConnect: Bool { voxSelected ? voxActivated && voxCountry != nil : selectedProfile != nil }
+    private var canConnect: Bool {
+        guard voxSelected else { return selectedProfile != nil }
+        guard voxActivated, let voxCountry else { return false }
+        if !AppBuild.isVezde || voxCountries.isEmpty { return true }
+        return voxCountry == Self.automaticCountry
+            ? !voxCountriesForProtocol.isEmpty : voxCountriesForProtocol.contains { $0.code == voxCountry }
+    }
+
+    var voxCountriesForProtocol: [VoxCountry] {
+        voxCountries.filter { $0.supports(voxProtocol) }
+    }
+
+    func canChooseVoxProtocol(_ choice: VoxProtocol) -> Bool {
+        if voxCountries.isEmpty { return choice == .vless }
+        return voxCountries.contains {
+            (voxCountry == nil || voxCountry == Self.automaticCountry || $0.code == voxCountry) && $0.supports(choice)
+        }
+    }
+
+    func chooseVoxProtocol(_ choice: VoxProtocol) {
+        guard AppBuild.isVezde, isIdle, canChooseVoxProtocol(choice) else { return }
+        voxProtocol = choice
+        defaults.set(choice.rawValue, forKey: "voxProtocol")
+        chooseVox()
+    }
 
     var selectedProfile: Profile? { profiles.first(where: { $0.id == selection })?.profile }
     var isIdle: Bool { state == .idle }
@@ -202,7 +232,7 @@ final class VPNModel: ObservableObject {
 
     func reconnectWithCurrentSettings() {
         guard state == .connected, let activeRequest else { return }
-        guard let profile = voxSelected ? activeRequest.profile : selectedProfile else { return }
+        guard let profile = voxSelected ? activeRequest.profile : selectedProfile.map(ConnectionProfile.manual) else { return }
         let request = connectionRequest(for: profile)
         if request.profile == activeRequest.profile && request.directSites == activeRequest.directSites
             && request.directRuSites == activeRequest.directRuSites && request.vpnSites == activeRequest.vpnSites {
@@ -345,7 +375,7 @@ final class VPNModel: ObservableObject {
 
     func chooseVoxCountry(_ code: String) {
         let automatic = AppBuild.isVezde && code == Self.automaticCountry
-        guard isIdle, automatic || voxCountries.contains(where: { $0.code == code }) else { return }
+        guard isIdle, automatic || voxCountriesForProtocol.contains(where: { $0.code == code }) else { return }
         voxCountry = code
         defaults.set(code, forKey: "voxCountry")
         chooseVox()
@@ -378,12 +408,17 @@ final class VPNModel: ObservableObject {
                     voxActivated = true
                 }
                 voxCountries = countries
-                let automatic = AppBuild.isVezde && voxCountry == Self.automaticCountry
-                if isIdle && !automatic && !countries.contains(where: { $0.code == voxCountry }) {
-                    let country = countries.first(where: { $0.code == "SG" }) ?? countries[0]
-                    let code = AppBuild.isVezde ? Self.automaticCountry : country.code
-                    voxCountry = code
-                    defaults.set(code, forKey: "voxCountry")
+                if isIdle {
+                    if voxCountry == nil {
+                        let code = AppBuild.isVezde ? Self.automaticCountry
+                            : (countries.first(where: { $0.code == "SG" }) ?? countries[0]).code
+                        voxCountry = code
+                        defaults.set(code, forKey: "voxCountry")
+                    }
+                    if !AppBuild.isVezde && !countries.contains(where: { $0.code == voxCountry }) {
+                        voxCountry = (countries.first(where: { $0.code == "SG" }) ?? countries[0]).code
+                        defaults.set(voxCountry, forKey: "voxCountry")
+                    }
                 }
                 if activating {
                     chooseVox()
@@ -432,6 +467,8 @@ final class VPNModel: ObservableObject {
         voxCountry = nil
         defaults.removeObject(forKey: "voxCountry")
         defaults.removeObject(forKey: "lastAutomaticVoxCountry")
+        voxProtocol = .vless
+        defaults.removeObject(forKey: "voxProtocol")
     }
 
     private func save(_ entries: [SavedProfile]) throws {
@@ -572,11 +609,11 @@ final class VPNModel: ObservableObject {
 
     private struct VoxCandidate: Encodable {
         let country: String
-        let profile: Profile
+        let profile: ConnectionProfile
     }
 
     private struct ConnectionRequest: Encodable {
-        var profile: Profile
+        var profile: ConnectionProfile
         let directSites: String
         let directRuSites: Bool
         let previousEntryIP: String?
@@ -585,7 +622,7 @@ final class VPNModel: ObservableObject {
         let alternatives: [VoxCandidate]?
     }
 
-    private func connectionRequest(for profile: Profile, country: String? = nil,
+    private func connectionRequest(for profile: ConnectionProfile, country: String? = nil,
                                    alternatives: [VoxCandidate]? = nil) -> ConnectionRequest {
         let only = preferences.splitMode == .only
         return ConnectionRequest(
@@ -596,7 +633,7 @@ final class VPNModel: ObservableObject {
         )
     }
 
-    func connect(allowInstall: Bool = true, cachedVoxProfile: Profile? = nil) {
+    func connect(allowInstall: Bool = true, cachedVoxProfile: ConnectionProfile? = nil) {
         guard isIdle, !importBusy, !provisioning, canConnect, !tunnelInUse else { return }
         if voxSelected {
             if let cachedVoxProfile {
@@ -605,7 +642,7 @@ final class VPNModel: ObservableObject {
                 connectVox(allowInstall: allowInstall)
             }
         } else if let profile = selectedProfile {
-            startConnection(profile, allowInstall: allowInstall)
+            startConnection(.manual(profile), allowInstall: allowInstall)
         }
     }
 
@@ -653,7 +690,7 @@ final class VPNModel: ObservableObject {
             available = voxCountries
         }
         let last = defaults.string(forKey: "lastAutomaticVoxCountry")
-        let codes = available.map(\.code)
+        let codes = available.filter { $0.supports(voxProtocol) }.map(\.code)
         let priority = [last, "SG", "DE", "JP"].compactMap { $0 } + codes
         var seen = Set<String>()
         let preferred = priority.filter { codes.contains($0) && seen.insert($0).inserted }
@@ -684,26 +721,30 @@ final class VPNModel: ObservableObject {
     @MainActor
     private func fetchVoxCandidate(using vox: VoxSubscription, token: String, country: String,
                                    deviceID: UUID, retry: Bool = true) async throws -> VoxCandidate {
-        let link = try await fetchVoxLink(using: vox, token: token, country: country, deviceID: deviceID, retry: retry)
+        let choice = voxProtocol
+        let config = try await fetchVoxConfig(using: vox, token: token, country: country, deviceID: deviceID,
+                                             choice: choice, retry: retry)
         try Task.checkCancellation()
-        let profile = try await importVoxProfile(link)
-        return VoxCandidate(country: country, profile: profile)
+        if choice == .vless {
+            return VoxCandidate(country: country, profile: .manual(try await importVoxProfile(config)))
+        }
+        return VoxCandidate(country: country, profile: .voxUDP(.init(voxProtocol: choice, config: config)))
     }
 
     @MainActor
-    private func fetchVoxLink(using vox: VoxSubscription, token: String, country: String,
-                              deviceID: UUID, retry: Bool) async throws -> String {
+    private func fetchVoxConfig(using vox: VoxSubscription, token: String, country: String,
+                                deviceID: UUID, choice: VoxProtocol, retry: Bool) async throws -> String {
         if retry && AppBuild.isVezde {
             for delay: UInt64 in [1, 2] {
                 do {
-                    return try await vox.link(token: token, country: country, deviceID: deviceID)
+                    return try await vox.config(token: token, country: country, deviceID: deviceID, choice: choice)
                 } catch let error as VoxSubscription.TemporaryError {
                     detail = "Повторяем запрос профиля Vox…"
                     try await Task.sleep(nanoseconds: max(delay, error.retryAfter) * 1_000_000_000)
                 }
             }
         }
-        return try await vox.link(token: token, country: country, deviceID: deviceID)
+        return try await vox.config(token: token, country: country, deviceID: deviceID, choice: choice)
     }
 
     private func importVoxProfile(_ link: String) async throws -> Profile {
@@ -731,7 +772,7 @@ final class VPNModel: ObservableObject {
         }
     }
 
-    private func startConnection(_ profile: Profile, allowInstall: Bool, country: String? = nil,
+    private func startConnection(_ profile: ConnectionProfile, allowInstall: Bool, country: String? = nil,
                                  alternatives: [VoxCandidate]? = nil) {
         let request = connectionRequest(for: profile, country: country, alternatives: alternatives)
         guard let payload = try? JSONEncoder().encode(request) else {
@@ -875,6 +916,7 @@ final class VPNModel: ObservableObject {
             if state != .disconnecting { detail = event.message }
         case "reconnecting":
             guard state != .disconnecting else { return }
+            connectedVoxProtocol = nil
             state = .reconnecting
             detail = event.message
         case "connected":
@@ -884,6 +926,7 @@ final class VPNModel: ObservableObject {
             exitIP = event.message
             if voxSelected {
                 connectedVoxCountry = event.country
+                connectedVoxProtocol = event.voxProtocol ?? .vless
                 if let candidate = activeRequest?.alternatives?.first(where: { $0.country == event.country }) {
                     activeRequest?.profile = candidate.profile
                     activeRequest?.country = candidate.country
@@ -936,6 +979,7 @@ final class VPNModel: ObservableObject {
         activeRequest = nil
         exitIP = nil
         if !reconnectWithSettingsPending { connectedVoxCountry = nil }
+        connectedVoxProtocol = nil
         state = stoppingTerminal && status != 0 ? .terminalConnected : .idle
         if quitCompletion != nil && updateShutdownTimeout == nil {
             if status != 0 {

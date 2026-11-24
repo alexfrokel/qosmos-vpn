@@ -51,6 +51,13 @@ install -m 0644 "$source_dir/tun-template.json" "$resources/mac-vpn.json"
 install -m 0644 "$source_dir/ru-direct-domains.LICENSE" "$resources/ru-direct-domains.LICENSE"
 install -m 0755 "$engines/xray-test" "$resources/xray"
 install -m 0755 "$engines/sing-box" "$resources/sing-box"
+if [[ "$variant" = vezde ]]; then
+    amnezia_dir="$build/amnezia-engine"
+    /bin/bash "$source_dir/../VezdeVPN/build-amnezia-box.sh" "$amnezia_dir"
+    install -m 0755 "$amnezia_dir/amnezia-box" "$resources/amnezia-box"
+    install -m 0644 "$amnezia_dir/amnezia-box-LICENSE" "$amnezia_dir/amnezia-box-SOURCE.txt" "$resources/"
+    codesign --force --sign - "$resources/amnezia-box"
+fi
 for license in xray-LICENSE sing-box-LICENSE; do
     if [[ -f "$engines/$license" ]]; then
         install -m 0644 "$engines/$license" "$resources/$license"
@@ -77,7 +84,7 @@ xcrun swiftc -target "$swift_target" -O -module-cache-path "$module_cache" \
     -o "$service_dir/tunnel-service"
 codesign --force --sign - "$service_dir/tunnel-service" "$service_dir/sing-box"
 COPYFILE_DISABLE=1 pkgbuild --root "$package_root" --scripts "$source_dir/tunnel-installer" \
-    --install-location / --ownership recommended --identifier local.vlessvpn.tunnel.pkg --version 12 \
+    --install-location / --ownership recommended --identifier local.vlessvpn.tunnel.pkg --version 13 \
     "$resources/Qosmos Tunnel.pkg"
 xcrun swiftc -target "$swift_target" -parse-as-library -O -module-cache-path "$module_cache" \
     "$source_dir/VlessVPN.swift" "$source_dir/AppSettings.swift" "$source_dir/ServerSetup.swift" \

@@ -1,10 +1,47 @@
 import Foundation
 import Security
 
+enum VoxProtocol: String, Codable, CaseIterable, Identifiable {
+    case vless, wireguard, amneziawg
+
+    var id: Self { self }
+
+    var label: String {
+        switch self {
+        case .vless: "VLESS + REALITY"
+        case .wireguard: "WireGuard"
+        case .amneziawg: "AmneziaWG"
+        }
+    }
+}
+
+enum ConnectionProfile: Encodable, Equatable {
+    case manual(Profile)
+    case voxUDP(VoxUDPProfile)
+
+    struct VoxUDPProfile: Encodable, Equatable {
+        let voxProtocol: VoxProtocol
+        let config: String
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var value = encoder.singleValueContainer()
+        switch self {
+        case let .manual(profile): try value.encode(profile)
+        case let .voxUDP(profile): try value.encode(profile)
+        }
+    }
+}
+
 struct VoxCountry: Decodable, Identifiable {
     let code: String
     let name: String
+    let protocols: [String]?
     var id: String { code }
+
+    func supports(_ choice: VoxProtocol) -> Bool {
+        protocols?.contains(choice.rawValue) ?? (choice == .vless)
+    }
 
     func label(language: AppLanguage) -> String {
         Locale(identifier: language.rawValue).localizedString(forRegionCode: code) ?? name
@@ -43,12 +80,31 @@ final class VoxSubscription {
         var errorDescription: String? { "Сервер подписки Vox недоступен. Повторите попытку." }
     }
 
-    private struct Locations: Decodable { let countries: [VoxCountry] }
-    private struct Configuration: Decodable { let link: String }
+    private struct Locations: Decodable {
+        let countries: [VoxCountry]
+        let protocol_countries: [VoxCountry]?
+    }
+
+    private struct Configuration: Decodable {
+        let protocolName: VoxProtocol?
+        let link: String?
+        let config: String?
+
+        enum CodingKeys: String, CodingKey {
+            case protocolName = "protocol"
+            case link, config
+        }
+    }
     private struct Rejection: Decodable { let error: String }
     private struct Device: Encodable {
         let country: String
         let device_id: UUID
+        let protocolName: VoxProtocol
+
+        enum CodingKeys: String, CodingKey {
+            case country, device_id
+            case protocolName = "protocol"
+        }
     }
 
     private let origin: URL
@@ -72,24 +128,31 @@ final class VoxSubscription {
 
     func countries(token: String) async throws -> [VoxCountry] {
         let locations: Locations = try await request("locations", token: token)
-        guard !locations.countries.isEmpty else {
+        let countries = AppBuild.isVezde ? locations.protocol_countries ?? locations.countries : locations.countries
+        guard !countries.isEmpty else {
             throw AppError(message: "В подписке Vox пока нет доступных стран.")
         }
-        return locations.countries
+        return countries
     }
 
     func usage(token: String) async throws -> VoxUsage {
         try await request("subscription", token: token)
     }
 
-    func link(token: String, country: String, deviceID: UUID) async throws -> String {
-        let body = try JSONEncoder().encode(Device(country: country, device_id: deviceID))
+    func config(token: String, country: String, deviceID: UUID, choice: VoxProtocol) async throws -> String {
+        let body = try JSONEncoder().encode(Device(country: country, device_id: deviceID, protocolName: choice))
         let response: Configuration = try await request("config", token: token, body: body)
-        let link = response.link
-        guard link.hasPrefix("vless://"), link.utf8.count <= 16_384, link.rangeOfCharacter(from: .newlines) == nil else {
+        let config = choice == .vless ? response.link : response.config
+        guard (response.protocolName ?? .vless) == choice,
+              let config, config.utf8.count <= 16_384 else {
             throw AppError(message: "Vox вернул некорректный профиль VPN.")
         }
-        return link
+        if choice == .vless {
+            guard config.hasPrefix("vless://"), config.rangeOfCharacter(from: .newlines) == nil else {
+                throw AppError(message: "Vox вернул некорректный профиль VPN.")
+            }
+        }
+        return config
     }
 
     private func request<T: Decodable>(_ path: String, token: String, body: Data? = nil) async throws -> T {

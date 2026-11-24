@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+import base64
+import configparser
 import errno
 import fcntl
 import ipaddress
@@ -29,6 +31,7 @@ SHARED_STORAGE = Path.home() / "Library/Application Support/VLESS VPN"
 APP_STORAGE = Path.home() / "Library/Application Support/Vezde VPN" if VEZDE else SHARED_STORAGE
 XRAY = RESOURCES / "xray"
 SING_BOX = RESOURCES / "sing-box"
+AMNEZIA_BOX = RESOURCES / "amnezia-box"
 CHECK_URL = "https://api.ipify.org/"
 FALLBACK_CHECK_URL = "https://1.1.1.1/cdn-cgi/trace"
 AWS_CHECK_URL = "https://checkip.amazonaws.com/"
@@ -44,6 +47,7 @@ RU_SPLIT_SERVICE_READY = SERVICE / "tunnel-split-ru-v12"
 CLOUDFLARE_SERVICE_READY = SERVICE / "tunnel-cloudflare-v7"
 VPN_SITES_SERVICE_READY = SERVICE / "tunnel-vpn-sites-v8"
 EXTENDED_SPLIT_SERVICE_READY = SERVICE / "tunnel-split-v9"
+UDP_SERVICE_READY = SERVICE / "tunnel-udp-v13"
 MAX_SPLIT_SITES = 20
 PREVIOUS_SERVICE_READY = SERVICE / "kill-switch-v2"
 AUTHORIZE = """on run argv
@@ -198,6 +202,70 @@ def validate(profile):
     return profile
 
 
+def validate_connection_profile(profile):
+    protocol = profile.get("voxProtocol")
+    if not VEZDE or protocol is None:
+        return validate(profile)
+    try:
+        config = profile["config"]
+        if protocol not in ("wireguard", "amneziawg") or not isinstance(config, str) or len(config) > 16384:
+            raise ValueError
+        parsed = configparser.ConfigParser(interpolation=None, delimiters=("=",), empty_lines_in_values=False)
+        parsed.read_string(config)
+        if set(parsed.sections()) != {"Interface", "Peer"} or parsed.defaults():
+            raise ValueError
+        interface, peer = parsed["Interface"], parsed["Peer"]
+        obfuscation = {"jc", "jmin", "jmax", "s1", "s2", "s3", "s4", "h1", "h2", "h3", "h4",
+                       "i1", "i2", "i3", "i4", "i5"} if protocol == "amneziawg" else set()
+        if interface.keys() - ({"privatekey", "address", "dns", "mtu"} | obfuscation):
+            raise ValueError
+        if peer.keys() - {"publickey", "presharedkey", "allowedips", "persistentkeepalive", "endpoint"}:
+            raise ValueError
+        host, _, port = peer["endpoint"].rpartition(":")
+        endpoint = ipaddress.ip_address(host.strip("[]"))
+        port = int(port)
+        mtu = int(interface.get("mtu", "1280"))
+        keepalive = int(peer.get("persistentkeepalive", "0"))
+        if not (endpoint.is_global and not endpoint.is_multicast and 1 <= port <= 65535
+                and 576 <= mtu <= 1500 and 0 <= keepalive <= 65535):
+            raise ValueError
+        for key in (interface["privatekey"], peer["publickey"], *([peer["presharedkey"]] if "presharedkey" in peer else [])):
+            if len(base64.b64decode(key, validate=True)) != 32:
+                raise ValueError
+        peer_settings = {
+            "address": str(endpoint), "port": port, "public_key": peer["publickey"],
+            "allowed_ips": [str(ipaddress.ip_network(value.strip())) for value in peer["allowedips"].split(",")],
+            "persistent_keepalive_interval": keepalive,
+        }
+        if "presharedkey" in peer:
+            key_field = "preshared_key" if protocol == "amneziawg" else "pre_shared_key"
+            peer_settings[key_field] = peer["presharedkey"]
+        settings = {
+            "type": "awg" if protocol == "amneziawg" else "wireguard", "tag": "vox",
+            "private_key": interface["privatekey"], "mtu": mtu,
+            "address": [str(ipaddress.ip_interface(value.strip())) for value in interface["address"].split(",")],
+            "peers": [peer_settings],
+        }
+        if protocol == "amneziawg":
+            settings["useIntegratedTun"] = False
+            for field in obfuscation & interface.keys():
+                value = interface[field]
+                if field.startswith("h") or field.startswith("i"):
+                    if not re.fullmatch(r"[0-9]+(?:-[0-9]+)?" if field[0] == "h" else r"(?:<[a-z]+ [A-Za-z0-9]+>)+", value):
+                        raise ValueError
+                    settings[field] = value
+                else:
+                    number = int(value)
+                    if not 0 <= number <= 65535:
+                        raise ValueError
+                    settings[field] = number
+        dns = [ipaddress.ip_address(value.strip()) for value in interface.get("dns", "1.1.1.1").split(",")]
+        dns_server = next((str(address) for address in dns if address.version == 4), str(dns[0]))
+    except (AttributeError, KeyError, TypeError, ValueError, configparser.Error) as error:
+        raise ProfileError("Vox вернул некорректный профиль VPN.") from error
+    return {"host": str(endpoint), "port": port, "voxProtocol": protocol, "endpoint": settings, "dns": dns_server}
+
+
 def from_xray_json(source, fallback):
     try:
         document = json.loads(source)
@@ -296,7 +364,7 @@ def say(kind, message, **details):
     print(json.dumps({"kind": kind, "message": message, **details}, ensure_ascii=False), flush=True)
 
 
-def port_ready(port, proxy, attempts=40):
+def port_ready(port, proxy, attempts=40, engine="Xray"):
     for _ in range(attempts):
         if proxy.poll() is not None:
             break
@@ -305,7 +373,7 @@ def port_ready(port, proxy, attempts=40):
                 return
         except OSError:
             time.sleep(0.05)
-    raise TransientConnectionError("Xray не смог открыть локальный прокси.")
+    raise TransientConnectionError(f"{engine} не смог открыть локальный прокси.")
 
 
 def check_https_address(url, proxy_args):
@@ -421,7 +489,8 @@ def run_admin(arguments, failure, include_error=False):
     return result.stdout
 
 
-def prepare_service(allow_install, split=False, direct_ru=False, cloudflare=False, vpn_sites=False, extended_split=False):
+def prepare_service(allow_install, split=False, direct_ru=False, cloudflare=False, vpn_sites=False,
+                    extended_split=False, udp=False):
     required = RU_SPLIT_SERVICE_READY if direct_ru else (SPLIT_SERVICE_READY if split else SERVICE_READY)
     if cloudflare:
         required = CLOUDFLARE_SERVICE_READY
@@ -431,7 +500,7 @@ def prepare_service(allow_install, split=False, direct_ru=False, cloudflare=Fals
         required = EXTENDED_SPLIT_SERVICE_READY
     if direct_ru:
         required = RU_SPLIT_SERVICE_READY
-    if not required.is_file():
+    if not required.is_file() or (udp and not UDP_SERVICE_READY.is_file()):
         if not allow_install:
             raise ProfileError("Для автоподключения один раз подключитесь вручную и установите службу Qosmos VPN.")
         say("progress", "macOS запросит пароль для установки или обновления службы Qosmos VPN.")
@@ -479,14 +548,16 @@ def release_protection():
     connection.close()
 
 
-def start_tunnel(endpoint, port, server_port, protect, direct_sites, direct_ru, cloudflare=False, vpn_sites=()):
+def start_tunnel(endpoint, port, server_port, protect, direct_sites, direct_ru, cloudflare=False, vpn_sites=(),
+                 udp=False):
     try:
         opcode = 5 if direct_ru else (4 if direct_sites else 3)
         if cloudflare:
             opcode = 6
         if vpn_sites:
             opcode = 7
-        request = struct.pack("!BB16sHHB", opcode, endpoint.version, endpoint.packed, port, server_port, protect)
+        request = struct.pack("!BB16sHHB", opcode + (5 if udp else 0), endpoint.version, endpoint.packed,
+                              port, server_port, protect)
         if opcode in (4, 5, 6):
             if cloudflare:
                 request += bytes([direct_ru])
@@ -646,7 +717,8 @@ def connect(profile, allow_install, protect, direct_sites, direct_ru=False, prev
                 raise ProfileError("Этот системный туннель уже запущен. Отключите его в приложении перед новым подключением.")
             prepare_service(allow_install, split=bool(direct_hosts), direct_ru=direct_ru,
                             cloudflare=bool(profile.get("cloudflareHost")), vpn_sites=bool(only_hosts),
-                            extended_split=max(len(direct_hosts), len(only_hosts)) > 8)
+                            extended_split=max(len(direct_hosts), len(only_hosts)) > 8,
+                            udp=bool(profile.get("voxProtocol")))
             blocked = protection_blocked()
             endpoint = None
             if blocked and previous_entry_ip is not None:
@@ -751,6 +823,30 @@ def start_xray(profile, endpoint, stack, cloudflare_interface=None):
         stack.callback(stop_proxy, bridge)
         port_ready(bridge_port, bridge)
     return port, proxy, bridge
+
+
+def start_vox_udp(profile, stack):
+    port, = local_ports(1)
+    config = {
+        "log": {"disabled": True},
+        "inbounds": [{"type": "socks", "listen": "127.0.0.1", "listen_port": port}],
+        "endpoints": [profile["endpoint"]],
+        "dns": {"servers": [{"type": "udp", "tag": "vox-dns", "server": profile["dns"], "detour": "vox"}],
+                "final": "vox-dns"},
+        "route": {"final": "vox", "default_domain_resolver": "vox-dns"},
+    }
+    engine = AMNEZIA_BOX if profile["voxProtocol"] == "amneziawg" else SING_BOX
+    directory = stack.enter_context(tempfile.TemporaryDirectory(prefix="vezde-vox-", dir="/private/tmp"))
+    path = Path(directory) / "udp.json"
+    path.write_text(json.dumps(config))
+    try:
+        proxy = subprocess.Popen([engine, "run", "-c", path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except OSError as error:
+        raise ProfileError("В сборке отсутствует движок выбранного протокола VPN.") from error
+    stack.callback(stop_proxy, proxy)
+    label = "AmneziaWG" if profile["voxProtocol"] == "amneziawg" else "WireGuard"
+    port_ready(port, proxy, engine=label)
+    return port, proxy
 
 
 def start_ssh(profile, stack):
@@ -860,8 +956,16 @@ def run_connection(profile, protect, direct_sites, direct_ru, app_pid, previous_
     cloudflare_host = profile.get("cloudflareHost")
     ssh_user = profile.get("sshUser")
     server_port = (profile.get("sshPort") or 22) if ssh_user else (443 if cloudflare_host else profile["port"])
+    protocol = profile.get("voxProtocol")
     with ExitStack() as stack:
-        if cloudflare_host:
+        if protocol:
+            endpoint, bridge = ipaddress.ip_address(profile["host"]), None
+            port, proxy = start_vox_udp(profile, stack)
+            upstream_ip = check_connection(port).address
+            if upstream_ip is None:
+                label = "WireGuard" if protocol == "wireguard" else "AmneziaWG"
+                raise HTTPSProbeError(f"Не прошла проверка HTTPS через {label}.")
+        elif cloudflare_host:
             endpoint, port, proxy, bridge, upstream_ip = start_cloudflare(profile, stack, previous_endpoint)
         elif ssh_user:
             endpoint, port, proxy, bridge, upstream_ip = start_ssh(profile, stack)
@@ -897,7 +1001,7 @@ def run_connection(profile, protect, direct_sites, direct_ru, app_pid, previous_
         say("progress", "Запускаем системный туннель…")
         try:
             with start_tunnel(endpoint, port, server_port, protect, direct_sites, direct_ru,
-                              cloudflare=bool(cloudflare_host), vpn_sites=vpn_sites) as service:
+                              cloudflare=bool(cloudflare_host), vpn_sites=vpn_sites, udp=bool(protocol)) as service:
                 for _ in range(40):
                     if tunnel_exists():
                         break
@@ -919,7 +1023,7 @@ def run_connection(profile, protect, direct_sites, direct_ru, app_pid, previous_
                         raise HTTPSProbeError("Системный туннель запустился, но проверка не получила выходной IPv4 через VPN.")
                     raise ProfileError("Системный маршрут не совпал с выходом через VPS. Отключите другие VPN и повторите.")
                 say("connected", str(upstream_ip), entryIP=str(endpoint), detail=check.connection_detail(),
-                    country=country)
+                    country=country, voxProtocol=(protocol or "vless") if country else None)
                 reason = monitor_connection(service, proxy, bridge, app_pid, upstream_ip, port if vpn_sites else None)
                 if os.getppid() == app_pid:
                     say("reconnecting", reason or "Восстанавливаем соединение с VPN…")
@@ -978,10 +1082,10 @@ if __name__ == "__main__":
         elif mode in ("connect", "connect-auto"):
             request = json.loads(sys.stdin.read())
             alternatives = [
-                (validate(candidate["profile"]), candidate["country"])
+                (validate_connection_profile(candidate["profile"]), candidate["country"])
                 for candidate in request.get("alternatives", [])
             ] if VEZDE else ()
-            connect(validate(request.get("profile", request)), allow_install=mode == "connect",
+            connect(validate_connection_profile(request.get("profile", request)), allow_install=mode == "connect",
                     protect="--no-kill-switch" not in sys.argv[2:], direct_sites=request.get("directSites", ""),
                     direct_ru=request.get("directRuSites") is True, previous_entry_ip=request.get("previousEntryIP"),
                     vpn_sites=request.get("vpnSites"), country=request.get("country"), alternatives=alternatives)

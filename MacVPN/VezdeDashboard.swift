@@ -22,6 +22,7 @@ struct VezdeDashboard: View {
             if model.voxActivated {
                 connectionButton
                 countryPicker
+                protocolPicker
                 statistics
             } else {
                 activationButton
@@ -98,6 +99,15 @@ struct VezdeDashboard: View {
                             .foregroundStyle(mint)
                             .textSelection(.enabled)
                             .accessibilityLabel(preferences.text("IP выхода VPN") + " " + exitIP)
+                        if let activeProtocol = model.connectedVoxProtocol {
+                            Text(activeProtocol.label)
+                                .font(.system(size: 11, weight: .semibold))
+                                .foregroundStyle(mint)
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 4)
+                                .background(mint.opacity(0.12), in: Capsule())
+                                .accessibilityLabel(preferences.text("Активный протокол") + " " + activeProtocol.label)
+                        }
                     }
                 }
                 Text(preferences.text(model.stateLabel))
@@ -225,6 +235,40 @@ struct VezdeDashboard: View {
         }
     }
 
+    private var protocolPicker: some View {
+        HStack(spacing: 10) {
+            Label(preferences.text("Протокол"), systemImage: "network")
+                .font(.system(size: 13, weight: .medium))
+                .foregroundStyle(muted)
+            Spacer()
+            Menu {
+                ForEach(VoxProtocol.allCases) { choice in
+                    Button {
+                        model.chooseVoxProtocol(choice)
+                    } label: {
+                        if model.voxProtocol == choice {
+                            Label(choice.label, systemImage: "checkmark")
+                        } else {
+                            Text(choice.label)
+                        }
+                    }
+                    .disabled(!model.canChooseVoxProtocol(choice))
+                }
+            } label: {
+                Text(model.voxProtocol.label)
+                    .font(.system(size: 13, weight: .semibold))
+            }
+            .menuStyle(.borderlessButton)
+            .fixedSize()
+            .accessibilityLabel(preferences.text("Протокол") + " " + model.voxProtocol.label)
+            .disabled(!model.isIdle)
+            .help(preferences.text(model.isIdle ? "Выбрать протокол" : "Отключите VPN, чтобы сменить протокол."))
+        }
+        .padding(.vertical, 8)
+        .padding(.horizontal, 12)
+        .background(panel, in: RoundedRectangle(cornerRadius: 13))
+    }
+
     private var statistics: some View {
         HStack(alignment: .top, spacing: 17) {
             metric("Устройства", icon: "laptopcomputer.and.iphone",
@@ -274,7 +318,7 @@ private struct VezdeCountryPicker: View {
 
     private var countries: [VoxCountry] {
         let query = filter.trimmingCharacters(in: .whitespacesAndNewlines)
-        return model.voxCountries.filter {
+        return model.voxCountriesForProtocol.filter {
             query.isEmpty || $0.label(language: preferences.language).localizedStandardContains(query)
                 || $0.name.localizedStandardContains(query) || $0.code.localizedStandardContains(query)
         }.sorted {
