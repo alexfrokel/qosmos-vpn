@@ -223,3 +223,15 @@
 "Переместите Vezde VPN в папку, доступную для записи." = "Move Vezde VPN to a writable folder.";
 "Отключите Vezde VPN, чтобы установить обновление." = "Disconnect Vezde VPN to install the update.";
 "Перезапускаем Vezde VPN…" = "Restarting Vezde VPN…";
+
+"Главная" = "Home";
+"Логин (почта)" = "Login email";
+"Почта не указана" = "Email not provided";
+"Демо-подписка" = "Demo subscription";
+"Действует до" = "Valid until";
+"Дата не указана" = "Date not set";
+"Активна" = "Active";
+"Приостановлена" = "Suspended";
+"Ожидает подключения" = "Awaiting first connection";
+"Продлить подписку" = "Renew subscription";
+"Оплата пока недоступна" = "Payment is currently unavailable";

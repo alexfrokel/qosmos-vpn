@@ -81,7 +81,7 @@ COPYFILE_DISABLE=1 pkgbuild --root "$package_root" --scripts "$source_dir/tunnel
     "$resources/Qosmos Tunnel.pkg"
 xcrun swiftc -target "$swift_target" -parse-as-library -O -module-cache-path "$module_cache" \
     "$source_dir/VlessVPN.swift" "$source_dir/AppSettings.swift" "$source_dir/ServerSetup.swift" \
-    "$source_dir/VoxSubscription.swift" "$source_dir/VezdeDashboard.swift" \
+    "$source_dir/VoxSubscription.swift" "$source_dir/VezdeDashboard.swift" "$source_dir/VezdeAccountView.swift" \
     -o "$app/Contents/MacOS/$executable"
 codesign --force --sign - "$app/Contents/Resources/xray" "$app/Contents/Resources/sing-box"
 if [[ -n "${QOSMOS_PYTHON_DIR:-}" ]]; then

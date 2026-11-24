@@ -11,6 +11,7 @@ import sqlite3
 import sys
 import uuid
 from contextlib import closing
+from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlencode
@@ -81,6 +82,11 @@ class Gateway:
                     token_hash TEXT NOT NULL UNIQUE,
                     provisioned INTEGER NOT NULL DEFAULT 0
                 );
+                CREATE TABLE IF NOT EXISTS account_profiles (
+                    external_id TEXT PRIMARY KEY REFERENCES accounts(external_id),
+                    email TEXT,
+                    expires_at TEXT
+                );
                 CREATE TABLE IF NOT EXISTS devices (
                     external_id TEXT NOT NULL REFERENCES accounts(external_id),
                     device_id TEXT NOT NULL,
@@ -105,6 +111,17 @@ class Gateway:
             db.execute("INSERT INTO accounts (external_id, token_hash) VALUES (?, ?)",
                        (external_id, self.digest(token)))
         return token
+
+    def update_profile(self, external_id, email, expires_at):
+        with closing(self.open_database()) as db, db:
+            if db.execute("SELECT 1 FROM accounts WHERE external_id = ?", (external_id,)).fetchone() is None:
+                raise GatewayError(404, "account_not_found")
+            db.execute("""
+                INSERT INTO account_profiles (external_id, email, expires_at) VALUES (?, ?, ?)
+                ON CONFLICT(external_id) DO UPDATE SET
+                    email = COALESCE(excluded.email, account_profiles.email),
+                    expires_at = COALESCE(excluded.expires_at, account_profiles.expires_at)
+            """, (external_id, email, expires_at))
 
     def account(self, authorization):
         if not re.fullmatch(r"Bearer qv_[A-Za-z0-9_-]{43}", authorization):
@@ -144,6 +161,10 @@ class Gateway:
             assigned, = db.execute(
                 "SELECT COUNT(*) FROM devices WHERE external_id = ?", (external_id,),
             ).fetchone()
+            profile = db.execute(
+                "SELECT email, expires_at FROM account_profiles WHERE external_id = ?", (external_id,),
+            ).fetchone()
+        email, expires_at = profile or (None, None)
         registered = user.get("devices_used", 0)
         month_bytes = user.get("traffic_month", {}).get("total_bytes", 0)
         if type(registered) is not int or registered < 0 or type(month_bytes) is not int or month_bytes < 0:
@@ -152,6 +173,9 @@ class Gateway:
             "devices_used": max(registered, assigned),
             "device_limit": DEMO_DEVICE_LIMIT,
             "monthly_bytes": month_bytes,
+            "email": email,
+            "expires_at": expires_at,
+            "subscription_status": user.get("status") if provisioned else "pending",
         }
 
     def slot(self, external_id, device_id):
@@ -249,6 +273,10 @@ def main():
     commands = parser.add_subparsers(dest="command", required=True)
     issue = commands.add_parser("issue")
     issue.add_argument("external_id", help="A test user ID starting with qosmos-demo-")
+    profile = commands.add_parser("profile", help="Update subscriber details without changing the activation code")
+    profile.add_argument("external_id")
+    profile.add_argument("--email")
+    profile.add_argument("--expires-at", help="ISO 8601 timestamp with a time zone")
     serve = commands.add_parser("serve")
     serve.add_argument("--port", type=int, default=8765)
     args = parser.parse_args()
@@ -260,6 +288,28 @@ def main():
             print(Gateway(args.database).issue(args.external_id))
         except sqlite3.IntegrityError:
             sys.exit("This demo user already has an activation code.")
+        return
+
+    if args.command == "profile":
+        if args.email is None and args.expires_at is None:
+            parser.error("Specify --email or --expires-at.")
+        if args.email is not None and (len(args.email) > 254 or not re.fullmatch(r"[^@\s]+@[^@\s]+", args.email)):
+            parser.error("Use a valid email address.")
+        expires = None
+        if args.expires_at is not None:
+            try:
+                instant = datetime.fromisoformat(args.expires_at.removesuffix("Z") + (
+                    "+00:00" if args.expires_at.endswith("Z") else ""
+                ))
+                if instant.utcoffset() is None:
+                    raise ValueError
+                expires = instant.astimezone(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+            except ValueError:
+                parser.error("Use an ISO 8601 expiration timestamp with a time zone.")
+        try:
+            Gateway(args.database).update_profile(args.external_id, args.email, expires)
+        except GatewayError:
+            sys.exit("Demo subscriber not found.")
         return
 
     key = os.environ.get("QOSMOS_VOX_DEMO_KEY") or getpass.getpass("Vox demo key: ")

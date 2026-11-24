@@ -15,11 +15,17 @@ struct VoxUsage: Decodable {
     let devicesUsed: Int
     let deviceLimit: Int
     let monthlyBytes: Int64
+    let email: String?
+    let expiresAt: String?
+    let subscriptionStatus: String?
 
     enum CodingKeys: String, CodingKey {
         case devicesUsed = "devices_used"
         case deviceLimit = "device_limit"
         case monthlyBytes = "monthly_bytes"
+        case email
+        case expiresAt = "expires_at"
+        case subscriptionStatus = "subscription_status"
     }
 }
 

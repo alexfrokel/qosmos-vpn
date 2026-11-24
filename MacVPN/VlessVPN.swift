@@ -1564,18 +1564,44 @@ struct VPNView: View {
         .background(canvas)
     }
 
+    private var vezdeNavigation: some View {
+        let tab: VezdeTab = model.showSettings ? .settings : (page == .vox ? .profile : .home)
+        let connected = model.state == .connected
+        return VStack(spacing: 0) {
+            Group {
+                switch tab {
+                case .home:
+                    VezdeDashboard(model: model, preferences: preferences) { page = .vox }
+                case .profile:
+                    VezdeAccountView(model: model, preferences: preferences)
+                case .settings:
+                    QosmosSettingsView(model: model, preferences: preferences)
+                }
+            }
+            .frame(width: VezdeLayout.width, height: VezdeLayout.contentHeight, alignment: .top)
+            VezdeNavigationBar(preferences: preferences, current: tab, connected: connected) { item in
+                if item == .settings {
+                    preferences.refreshLoginStatus()
+                } else {
+                    page = item == .profile ? .vox : .dashboard
+                }
+                model.showSettings = item == .settings
+            }
+        }
+        .frame(width: VezdeLayout.width)
+        .background(VezdeLayout.background(connected: connected))
+        .tint(VezdeLayout.mint)
+    }
+
     var body: some View {
         Group {
-            if model.showSettings {
+            if AppBuild.isVezde {
+                vezdeNavigation
+            } else if model.showSettings {
                 QosmosSettingsView(model: model, preferences: preferences)
             } else {
                 switch page {
-                case .dashboard:
-                    if AppBuild.isVezde {
-                        VezdeDashboard(model: model, preferences: preferences) { page = .vox }
-                    } else {
-                        dashboard
-                    }
+                case .dashboard: dashboard
                 case .profiles: subpage(profilesPage)
                 case .add: subpage(addPage)
                 case .paste: subpage(pastePage)

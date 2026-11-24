@@ -8,12 +8,12 @@ struct VezdeDashboard: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var showingCountries = false
 
-    private let ink = Color(red: 0.95, green: 0.97, blue: 0.96)
-    private let muted = Color(red: 0.66, green: 0.71, blue: 0.70)
-    private let mint = Color(red: 0.52, green: 0.98, blue: 0.73)
+    private let ink = VezdeLayout.ink
+    private let muted = VezdeLayout.muted
+    private let mint = VezdeLayout.mint
     private var highlighted: Bool { model.state == .connected }
     private var automatic: Bool { model.voxCountry == VPNModel.automaticCountry }
-    private var panel: Color { highlighted ? Color(red: 0.069, green: 0.118, blue: 0.106) : Color(white: 0.103) }
+    private var panel: Color { VezdeLayout.panel(connected: highlighted) }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 15) {
@@ -28,8 +28,8 @@ struct VezdeDashboard: View {
             }
         }
         .padding(20)
-        .frame(width: 466)
-        .background(highlighted ? Color(red: 0.047, green: 0.073, blue: 0.068) : Color(white: 0.072))
+        .frame(width: VezdeLayout.width)
+        .background(VezdeLayout.background(connected: highlighted))
         .foregroundStyle(ink)
         .tint(mint)
         .animation(reduceMotion ? nil : .easeOut(duration: 0.28), value: highlighted)
@@ -58,9 +58,7 @@ struct VezdeDashboard: View {
                 .font(.system(size: 24, weight: .bold, design: .rounded))
                 .tracking(-1.1)
             Spacer()
-            if model.voxActivated {
-                headerButton("person.crop.circle", title: "Подписка", action: openSubscription)
-            }
+            headerButton("person.crop.circle", title: "Профиль", action: openSubscription)
             headerButton("gearshape", title: "Настройки") {
                 preferences.refreshLoginStatus()
                 model.showSettings = true
@@ -287,8 +285,17 @@ private struct VezdeCountryPicker: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 11) {
-            Text(preferences.text("Выбрать страну"))
-                .font(.system(size: 18, weight: .semibold, design: .rounded))
+            HStack {
+                Text(preferences.text("Выбрать страну"))
+                    .font(.system(size: 18, weight: .semibold, design: .rounded))
+                Spacer()
+                Button { model.loadVoxCountries() } label: {
+                    Image(systemName: "arrow.clockwise").frame(width: 24, height: 24)
+                }
+                .buttonStyle(VezdePress())
+                .accessibilityLabel(preferences.text("Обновить список стран"))
+                .disabled(model.voxBusy)
+            }
             HStack(spacing: 7) {
                 Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
                     .accessibilityHidden(true)
@@ -371,7 +378,7 @@ private func routeIcon(_ code: String?, automatic: Bool) -> some View {
     }
 }
 
-private struct VezdePress: ButtonStyle {
+struct VezdePress: ButtonStyle {
     var dimWhenDisabled = true
 
     func makeBody(configuration: Configuration) -> some View {

@@ -355,16 +355,18 @@ struct QosmosSettingsView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 11) {
             HStack(spacing: 12) {
-                Button {
-                    if section == nil { model.showSettings = false }
-                    else { section = nil }
-                } label: {
-                    Image(systemName: "chevron.left")
-                        .font(.system(size: 14, weight: .semibold))
-                        .frame(width: 28, height: 28)
+                if section != nil || !AppBuild.isVezde {
+                    Button {
+                        if section == nil { model.showSettings = false }
+                        else { section = nil }
+                    } label: {
+                        Image(systemName: "chevron.left")
+                            .font(.system(size: 14, weight: .semibold))
+                            .frame(width: 28, height: 28)
+                    }
+                    .buttonStyle(.borderless)
+                    .accessibilityLabel(preferences.text("Назад"))
                 }
-                .buttonStyle(.borderless)
-                .accessibilityLabel(preferences.text("Назад"))
                 Text(preferences.text(section?.rawValue ?? "Настройки"))
                     .font(.system(size: 23, weight: .semibold, design: .rounded))
             }
@@ -394,10 +396,11 @@ struct QosmosSettingsView: View {
             }
         }
         .padding(24)
-        .frame(width: 430, height: 615)
+        .frame(width: AppBuild.isVezde ? VezdeLayout.width : 430,
+               height: AppBuild.isVezde ? VezdeLayout.contentHeight : 615)
         .tint(AppBuild.accent)
         .foregroundStyle(Color(red: 0.96, green: 0.95, blue: 0.93))
-        .background(AppBuild.canvas)
+        .background(AppBuild.isVezde ? VezdeLayout.background(connected: model.state == .connected) : AppBuild.canvas)
         .preferredColorScheme(.dark)
         .alert(preferences.text("Сбросить настройки и удалить профили?"), isPresented: $confirmReset) {
             Button(preferences.text("Сбросить"), role: .destructive) { model.resetData() }
