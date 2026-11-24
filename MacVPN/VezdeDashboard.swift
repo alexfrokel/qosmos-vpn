@@ -16,7 +16,7 @@ struct VezdeDashboard: View {
     private var panel: Color { VezdeLayout.panel(connected: highlighted) }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 15) {
+        VStack(alignment: .leading, spacing: 11) {
             header
             hero
             if model.voxActivated {
@@ -28,7 +28,8 @@ struct VezdeDashboard: View {
                 activationButton
             }
         }
-        .padding(20)
+        .padding(.horizontal, 20)
+        .padding(.vertical, 16)
         .frame(width: VezdeLayout.width)
         .background(VezdeLayout.background(connected: highlighted))
         .foregroundStyle(ink)
@@ -139,7 +140,7 @@ struct VezdeDashboard: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(20)
         }
-        .frame(height: 254)
+        .frame(height: 230)
         .clipShape(RoundedRectangle(cornerRadius: 22))
         .overlay(RoundedRectangle(cornerRadius: 22).strokeBorder(.white.opacity(0.12)))
     }

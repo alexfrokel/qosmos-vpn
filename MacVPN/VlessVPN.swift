@@ -390,7 +390,7 @@ final class VPNModel: ObservableObject {
         guard let vox, isIdle, !voxBusy else { return }
         let code = proposedCode.trimmingCharacters(in: .whitespacesAndNewlines)
         guard code.range(of: #"^qv_[A-Za-z0-9_-]{43}$"#, options: .regularExpression) != nil else {
-            errorMessage = "Код активации Vox недействителен."
+            errorMessage = "Код активации недействителен."
             return
         }
         refreshVoxCountries(using: vox, token: code, activating: true, onSuccess: onSuccess)
@@ -648,13 +648,13 @@ final class VPNModel: ObservableObject {
 
     private func connectVox(allowInstall: Bool) {
         guard let vox, let country = voxCountry, let token = vox.token() else {
-            errorMessage = "Код активации Vox недействителен."
+            errorMessage = "Код активации недействителен."
             return
         }
         let deviceID = defaults.string(forKey: "voxDeviceID").flatMap(UUID.init(uuidString:)) ?? UUID()
         defaults.set(deviceID.uuidString, forKey: "voxDeviceID")
         state = internetBlocked ? .reconnecting : .connecting
-        detail = "Получаем актуальный профиль Vox…"
+        detail = "Получаем профиль подключения…"
         voxConnectionTask = Task { @MainActor in
             do {
                 let candidates: [VoxCandidate]
@@ -677,6 +677,11 @@ final class VPNModel: ObservableObject {
         }
     }
 
+    private enum VoxSearchEvent {
+        case candidate(String, Result<VoxCandidate, Error>)
+        case graceExpired
+    }
+
     @MainActor
     private func automaticVoxCandidates(using vox: VoxSubscription, token: String,
                                         deviceID: UUID) async throws -> [VoxCandidate] {
@@ -696,26 +701,46 @@ final class VPNModel: ObservableObject {
         let preferred = priority.filter { codes.contains($0) && seen.insert($0).inserted }
         let candidates = Array(preferred.prefix(internetBlocked ? 1 : 3))
 
-        return try await withThrowingTaskGroup(of: (String, Result<VoxCandidate, Error>).self) { group in
+        let fetched = await withTaskGroup(of: VoxSearchEvent.self) { group in
             for code in candidates {
                 group.addTask { @MainActor in
                     do {
-                        return (code, .success(try await self.fetchVoxCandidate(
+                        return .candidate(code, .success(try await self.fetchVoxCandidate(
                             using: vox, token: token, country: code, deviceID: deviceID, retry: candidates.count == 1
                         )))
                     } catch {
-                        return (code, .failure(error))
+                        return .candidate(code, .failure(error))
                     }
                 }
             }
-            var fetched: [String: Result<VoxCandidate, Error>] = [:]
-            for try await (code, result) in group { fetched[code] = result }
-            try Task.checkCancellation()
-            let profiles = candidates.compactMap { code in fetched[code].flatMap { try? $0.get() } }
-            if !profiles.isEmpty { return profiles }
-            if let code = candidates.first, let result = fetched[code] { return [try result.get()] }
-            throw AppError(message: "В подписке Vox пока нет доступных стран.")
+            var results: [String: Result<VoxCandidate, Error>] = [:]
+            var receivedProfile = false
+            while let event = await group.next() {
+                guard case let .candidate(code, result) = event else { break }
+                results[code] = result
+                if results.count == candidates.count { break }
+                if !receivedProfile, case .success = result {
+                    receivedProfile = true
+                    // Give nearby alternatives a short window without waiting for the slowest location.
+                    group.addTask {
+                        try? await Task.sleep(nanoseconds: 750_000_000)
+                        return .graceExpired
+                    }
+                }
+            }
+            group.cancelAll()
+            return results
         }
+        try Task.checkCancellation()
+        let profiles = candidates.compactMap { code in fetched[code].flatMap { try? $0.get() } }
+        if !profiles.isEmpty { return profiles }
+        if let code = candidates.first, let result = fetched[code] {
+            if candidates.count > 1, case .failure(let error) = result, error is VoxSubscription.TemporaryError {
+                return [try await fetchVoxCandidate(using: vox, token: token, country: code, deviceID: deviceID)]
+            }
+            return [try result.get()]
+        }
+        throw AppError(message: "В подписке пока нет доступных стран.")
     }
 
     @MainActor
@@ -739,7 +764,7 @@ final class VPNModel: ObservableObject {
                 do {
                     return try await vox.config(token: token, country: country, deviceID: deviceID, choice: choice)
                 } catch let error as VoxSubscription.TemporaryError {
-                    detail = "Повторяем запрос профиля Vox…"
+                    detail = "Повторяем запрос профиля подключения…"
                     try await Task.sleep(nanoseconds: max(delay, error.retryAfter) * 1_000_000_000)
                 }
             }
@@ -751,7 +776,7 @@ final class VPNModel: ObservableObject {
         try await withCheckedThrowingContinuation { continuation in
             worker.async {
                 do {
-                    let (process, input, output) = try Self.makeBackend(["import", "Vox"])
+                    let (process, input, output) = try Self.makeBackend(["import", "Vezde VPN"])
                     try process.run()
                     try input.fileHandleForWriting.write(contentsOf: Data(link.utf8))
                     try input.fileHandleForWriting.close()
@@ -762,7 +787,7 @@ final class VPNModel: ObservableObject {
                           profiles.count == 1, let profile = profiles.first,
                           profile.security == "reality", ["tcp", "raw"].contains(profile.network),
                           profile.cloudflareHost == nil, profile.sshUser == nil else {
-                        throw AppError(message: "Vox вернул некорректный профиль VPN.")
+                        throw AppError(message: "Сервер выдал некорректный профиль VPN.")
                     }
                     continuation.resume(returning: profile)
                 } catch {
@@ -1615,7 +1640,9 @@ struct VPNView: View {
             Group {
                 switch tab {
                 case .home:
-                    VezdeDashboard(model: model, preferences: preferences) { page = .vox }
+                    ScrollView(showsIndicators: false) {
+                        VezdeDashboard(model: model, preferences: preferences) { page = .vox }
+                    }
                 case .profile:
                     VezdeAccountView(model: model, preferences: preferences)
                 case .settings:

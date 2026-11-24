@@ -77,7 +77,7 @@ private final class VoxNoRedirects: NSObject, URLSessionTaskDelegate {
 final class VoxSubscription {
     struct TemporaryError: LocalizedError {
         let retryAfter: UInt64
-        var errorDescription: String? { "Сервер подписки Vox недоступен. Повторите попытку." }
+        var errorDescription: String? { "Сервер подписки недоступен. Повторите попытку." }
     }
 
     private struct Locations: Decodable {
@@ -130,7 +130,7 @@ final class VoxSubscription {
         let locations: Locations = try await request("locations", token: token)
         let countries = AppBuild.isVezde ? locations.protocol_countries ?? locations.countries : locations.countries
         guard !countries.isEmpty else {
-            throw AppError(message: "В подписке Vox пока нет доступных стран.")
+            throw AppError(message: "В подписке пока нет доступных стран.")
         }
         return countries
     }
@@ -145,11 +145,11 @@ final class VoxSubscription {
         let config = choice == .vless ? response.link : response.config
         guard (response.protocolName ?? .vless) == choice,
               let config, config.utf8.count <= 16_384 else {
-            throw AppError(message: "Vox вернул некорректный профиль VPN.")
+            throw AppError(message: "Сервер выдал некорректный профиль VPN.")
         }
         if choice == .vless {
             guard config.hasPrefix("vless://"), config.rangeOfCharacter(from: .newlines) == nil else {
-                throw AppError(message: "Vox вернул некорректный профиль VPN.")
+                throw AppError(message: "Сервер выдал некорректный профиль VPN.")
             }
         }
         return config
@@ -173,20 +173,21 @@ final class VoxSubscription {
                 .dnsLookupFailed, .notConnectedToInternet, .resourceUnavailable].contains(error.code) {
                 throw TemporaryError(retryAfter: 0)
             }
-            throw AppError(message: "Сервер подписки Vox недоступен. Повторите попытку.")
+            throw AppError(message: "Сервер подписки недоступен. Повторите попытку.")
         }
         guard let http = response as? HTTPURLResponse, data.count <= 1_048_576 else {
-            throw AppError(message: "Сервер подписки Vox вернул некорректный ответ.")
+            throw AppError(message: "Сервер подписки вернул некорректный ответ.")
         }
-        if http.statusCode == 401 { throw AppError(message: "Код активации Vox недействителен.") }
+        if http.statusCode == 401 { throw AppError(message: "Код активации недействителен.") }
         if http.statusCode != 200 {
             let code = (try? JSONDecoder().decode(Rejection.self, from: data))?.error
             let message: String
             switch code {
-            case "device_limit": message = "Достигнут лимит устройств подписки Vox."
-            case "account_inactive": message = "Доступ по подписке Vox приостановлен."
-            case "country_unavailable": message = "Эта страна сейчас недоступна в Vox."
-            case "demo_required": message = "Для этой сборки нужен демо-аккаунт Vox."
+            case "device_limit": message = "Достигнут лимит устройств подписки."
+            case "account_inactive": message = "Доступ по подписке приостановлен."
+            case "invalid_profile": message = "Сервер выдал некорректный профиль VPN."
+            case "country_unavailable": message = "Эта страна сейчас недоступна для выбранного протокола."
+            case "demo_required": message = "Сервер подписки недоступен. Повторите попытку."
             default:
                 if [408, 429, 500, 502, 503, 504].contains(http.statusCode) {
                     let retryAfter = http.value(forHTTPHeaderField: "Retry-After") ?? "0"
@@ -194,12 +195,12 @@ final class VoxSubscription {
                         throw TemporaryError(retryAfter: seconds)
                     }
                 }
-                message = "Сервер подписки Vox недоступен. Повторите попытку."
+                message = "Сервер подписки недоступен. Повторите попытку."
             }
             throw AppError(message: message)
         }
         do { return try JSONDecoder().decode(T.self, from: data) }
-        catch { throw AppError(message: "Сервер подписки Vox вернул некорректный ответ.") }
+        catch { throw AppError(message: "Сервер подписки вернул некорректный ответ.") }
     }
 
     private var keychainQuery: [String: Any] {
@@ -226,14 +227,14 @@ final class VoxSubscription {
             status = SecItemAdd(query as CFDictionary, nil)
         }
         guard status == errSecSuccess else {
-            throw AppError(message: "Не удалось сохранить доступ Vox в Связке ключей.")
+            throw AppError(message: "Не удалось сохранить код активации в Связке ключей.")
         }
     }
 
     func clear() throws {
         let status = SecItemDelete(keychainQuery as CFDictionary)
         guard status == errSecSuccess || status == errSecItemNotFound else {
-            throw AppError(message: "Не удалось удалить доступ Vox из Связки ключей.")
+            throw AppError(message: "Не удалось удалить код активации из Связки ключей.")
         }
     }
 }

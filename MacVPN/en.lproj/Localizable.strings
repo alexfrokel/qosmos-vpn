@@ -178,17 +178,17 @@
 "Код активации" = "Activation code";
 "Активировать" = "Activate";
 "Активировать доступ и выбрать страну VPN." = "Activate your subscription and choose a VPN country.";
-"Получаем актуальный профиль Vox…" = "Fetching the latest Vox profile…";
-"Код активации Vox недействителен." = "The Vox activation code is invalid.";
-"В подписке Vox пока нет доступных стран." = "There are no countries available for this Vox subscription.";
-"Vox вернул некорректный профиль VPN." = "Vox returned an invalid VPN profile.";
-"Сервер подписки Vox недоступен. Повторите попытку." = "The Vox subscription server is unavailable. Try again.";
-"Сервер подписки Vox вернул некорректный ответ." = "The Vox subscription server returned an invalid response.";
-"Достигнут лимит устройств подписки Vox." = "Your Vox subscription has reached its device limit.";
-"Доступ по подписке Vox приостановлен." = "Your Vox subscription is suspended.";
-"Эта страна сейчас недоступна в Vox." = "This country is currently unavailable in Vox.";
-"Не удалось сохранить доступ Vox в Связке ключей." = "Could not save the Vox activation code in Keychain.";
-"Не удалось удалить доступ Vox из Связки ключей." = "Could not remove the Vox activation code from Keychain.";
+"Получаем профиль подключения…" = "Fetching the connection profile…";
+"Код активации недействителен." = "The activation code is invalid.";
+"В подписке пока нет доступных стран." = "There are no countries available for this subscription.";
+"Сервер выдал некорректный профиль VPN." = "The server returned an invalid VPN profile.";
+"Сервер подписки недоступен. Повторите попытку." = "The subscription server is unavailable. Try again.";
+"Сервер подписки вернул некорректный ответ." = "The subscription server returned an invalid response.";
+"Достигнут лимит устройств подписки." = "Your subscription has reached its device limit.";
+"Доступ по подписке приостановлен." = "Your subscription is suspended.";
+"Эта страна сейчас недоступна для выбранного протокола." = "This country is currently unavailable for the selected protocol.";
+"Не удалось сохранить код активации в Связке ключей." = "Could not save the activation code in Keychain.";
+"Не удалось удалить код активации из Связки ключей." = "Could not remove the activation code from Keychain.";
 
 "Подписка" = "Subscription";
 "Активировать подписку" = "Activate subscription";
@@ -203,8 +203,7 @@
 "Открыть Vezde VPN" = "Open Vezde VPN";
 "Выйти из Vezde VPN" = "Quit Vezde VPN";
 "Повторяем подключение…" = "Retrying the connection…";
-"Повторяем запрос профиля Vox…" = "Retrying the request for a Vox profile…";
-"Для этой сборки нужен демо-аккаунт Vox." = "This build requires a Vox demo account.";
+"Повторяем запрос профиля подключения…" = "Retrying the connection profile request…";
 "Ищем рабочий маршрут…" = "Finding a working route…";
 "Проверяем другую страну…" = "Trying another country…";
 "Авто" = "Auto";
@@ -238,3 +237,5 @@
 "Активный протокол" = "Active protocol";
 "Выбрать протокол" = "Choose protocol";
 "Отключите VPN, чтобы сменить протокол." = "Disconnect the VPN to change the protocol.";
+"Через WireGuard не открываются сайты. Попробуйте VLESS + REALITY." = "Sites are unreachable over WireGuard. Try VLESS + REALITY.";
+"Через AmneziaWG не открываются сайты. Попробуйте VLESS + REALITY." = "Sites are unreachable over AmneziaWG. Try VLESS + REALITY.";

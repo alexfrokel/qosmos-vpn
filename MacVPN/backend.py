@@ -262,7 +262,7 @@ def validate_connection_profile(profile):
         dns = [ipaddress.ip_address(value.strip()) for value in interface.get("dns", "1.1.1.1").split(",")]
         dns_server = next((str(address) for address in dns if address.version == 4), str(dns[0]))
     except (AttributeError, KeyError, TypeError, ValueError, configparser.Error) as error:
-        raise ProfileError("Vox вернул некорректный профиль VPN.") from error
+        raise ProfileError("Сервер выдал некорректный профиль VPN.") from error
     return {"host": str(endpoint), "port": port, "voxProtocol": protocol, "endpoint": settings, "dns": dns_server}
 
 
@@ -964,7 +964,7 @@ def run_connection(profile, protect, direct_sites, direct_ru, app_pid, previous_
             upstream_ip = check_connection(port).address
             if upstream_ip is None:
                 label = "WireGuard" if protocol == "wireguard" else "AmneziaWG"
-                raise HTTPSProbeError(f"Не прошла проверка HTTPS через {label}.")
+                raise HTTPSProbeError(f"Через {label} не открываются сайты. Попробуйте VLESS + REALITY.")
         elif cloudflare_host:
             endpoint, port, proxy, bridge, upstream_ip = start_cloudflare(profile, stack, previous_endpoint)
         elif ssh_user:

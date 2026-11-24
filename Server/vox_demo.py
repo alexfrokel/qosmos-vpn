@@ -13,6 +13,8 @@ import uuid
 from contextlib import closing
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from threading import Lock
+from time import monotonic
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlencode
 from urllib.request import HTTPRedirectHandler, Request, build_opener
@@ -21,6 +23,7 @@ VOX_API = "https://api.vox-vpn.com/partner/v1"
 MAX_RESPONSE = 1_048_576
 DEMO_DEVICE_LIMIT = 2
 PROTOCOLS = ("vless", "wireguard", "amneziawg")
+CATALOG_TTL = 45
 
 
 class GatewayError(Exception):
@@ -77,6 +80,8 @@ class Gateway:
     def __init__(self, database, vox=None):
         self.database = database
         self.vox = vox
+        self._catalog_lock = Lock()
+        self._catalog = (float('-inf'), [])
         with closing(self.open_database()) as db, db:
             db.executescript("""
                 CREATE TABLE IF NOT EXISTS accounts (
@@ -153,10 +158,18 @@ class Gateway:
             and (country is None or country == location["country"])
         ]
 
+    def catalog(self):
+        with self._catalog_lock:
+            timestamp, locations = self._catalog
+            if monotonic() - timestamp >= CATALOG_TTL:
+                locations = self.locations(protocol=None)
+                self._catalog = (monotonic(), locations)
+            return locations
+
     def countries(self):
         self.vox.require_demo()
         catalog = {}
-        for location in self.locations(protocol=None):
+        for location in self.catalog():
             code = location["country"]
             name, protocols = catalog.setdefault(code, (location["country_name"], set()))
             protocols.update(protocol for protocol in PROTOCOLS if protocol in location["protocols"])
@@ -217,7 +230,10 @@ class Gateway:
             raise GatewayError(400, "invalid_request") from error
 
         self.vox.require_demo()
-        locations = sorted(self.locations(country, protocol), key=lambda loc: loc["id"])
+        locations = sorted(
+            (loc for loc in self.catalog() if loc["country"] == country and protocol in loc["protocols"]),
+            key=lambda loc: loc["id"],
+        )
         if not locations:
             raise GatewayError(404, "country_unavailable")
         external_id, provisioned = account
@@ -228,16 +244,23 @@ class Gateway:
             with closing(self.open_database()) as db, db:
                 db.execute("UPDATE accounts SET provisioned = 1 WHERE external_id = ?", (external_id,))
 
-        query = urlencode({"protocol": protocol, "location": locations[0]["id"],
-                           "device": self.slot(external_id, device_id)})
-        result = self.vox.request(f"/users/{quote(external_id, safe='')}/config?{query}")
-        config = result["config"]
-        if result.get("protocol") != protocol or not isinstance(config, str) or len(config) > 16384:
-            raise GatewayError(502, "invalid_profile")
-        if protocol == "vless" and config.startswith("vless://"):
-            return {"protocol": protocol, "link": config}
-        if protocol != "vless" and config.lstrip().startswith("[Interface]"):
-            return {"protocol": protocol, "config": config}
+        slot = self.slot(external_id, device_id)
+        path = f"/users/{quote(external_id, safe='')}/config?"
+        candidates = locations[:2]
+        for index, location in enumerate(candidates):
+            query = urlencode({"protocol": protocol, "location": location["id"], "device": slot})
+            try:
+                result = self.vox.request(path + query)
+            except GatewayError as error:
+                if index + 1 == len(candidates) or error.status not in (502, 503):
+                    raise
+                continue
+            config = result.get("config")
+            if result.get("protocol") == protocol and isinstance(config, str) and len(config) <= 16384:
+                if protocol == "vless" and config.startswith("vless://"):
+                    return {"protocol": protocol, "link": config}
+                if protocol != "vless" and config.lstrip().startswith("[Interface]"):
+                    return {"protocol": protocol, "config": config}
         raise GatewayError(502, "invalid_profile")
 
 
